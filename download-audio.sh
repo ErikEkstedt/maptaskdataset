@@ -10,8 +10,8 @@ cd "$(dirname "$0")"
 
 dialogues="http://groups.inf.ed.ac.uk/maptask/signals/dialogues"
 annotations="http://groups.inf.ed.ac.uk/maptask/hcrcmaptask.nxtformatv2-1.zip"
-annotationDir=../data
-dialogueDir=../data/dialogue-wavs
+annotationDir=data
+dialogueDir=data/dialogue-wavs
 
 printf "${Yellow}"
 echo "Download and extract annotations? (y/n)"

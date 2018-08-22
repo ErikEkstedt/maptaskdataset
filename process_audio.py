@@ -10,8 +10,15 @@ annotation folder is downloaded locally.
 
 2.  Using OpenSmile GeMAP features are extracted for each of the mono-files and
     stores the features on disk as csv-files.
+
+3.  Maptask -> Tacotron. Tacotron utilizes short audio clips with correlating
+    word annotations. In NVIDIAS implementation the data is stored in short
+    wav-files and a csv where each row includes the filename and the associated
+    utterence string.
 '''
 
+import os
+from os.path import join
 
 # Assumes maptask dialogue files are downloaded in $dataPath
 full_path = os.path.realpath(__file__)

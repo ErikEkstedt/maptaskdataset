@@ -1,0 +1,6 @@
+audioread
+librosa
+matplotlib
+numpy
+scipy
+tqdm

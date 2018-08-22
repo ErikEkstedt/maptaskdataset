@@ -5,9 +5,9 @@ from tqdm import tqdm
 import librosa
 import numpy as np
 import os
+import glob
 import pathlib
 import xml.etree.ElementTree as ET
-
 
 def convertStereoToMono(data_path, outputPath, sr=20000):
     if not exists(data_path):
@@ -122,13 +122,18 @@ def extractGeMAPS(data_path, output_path, opensmile_path):
     print('Extracted GeMAP features from {} files.'.format(counter))
 
 
-def extract_tag_data(elements):
+def extract_tag_data(name, annotation_path):
     '''
     Extract timed-unit (tu), silence (si) and noise (noi) tags from the
     .xml annotation file.
 
     An xml-file represents a recorded dialog, e.g q1ec1.wav.
     '''
+    # load timed-units.xml
+    timed_units_path = join(annotation_path, 'Data/timed-units')
+    tu_path = join(timed_units_path, name + '.timed-units.xml')
+    elements = ET.parse(tu_path)
+
     tu, words, sil, noi = [], [], [], []
     for elem in elements.iter():
         try:
@@ -145,10 +150,12 @@ def extract_tag_data(elements):
         elif elem.tag == 'noi':
             # elem.attrib: start, end, type='outbreath/lipsmack/...'
             noi.append(tmp)
-    return {'tu': tu, 'silence': sil, 'noice': noi, 'words': words}
+    return {'tu': tu, 'silence': sil, 'noise': noi, 'words': words}
 
 
-def get_time_filename_utterence(name, timed_units_path, pause_time=1):
+# ------------------------------------------
+
+def get_time_filename_utterence(name, annotation_path, pause_time=1):
     '''
     Arguments
     ---------
@@ -168,10 +175,9 @@ def get_time_filename_utterence(name, timed_units_path, pause_time=1):
         dict['utterence'] = 'hello my name is'
     '''
     tu_data = []
-    name = name[:-4]  # remove .wav
+    # name = name[:-4]  # remove .wav
 
-    tu_path = join(timed_units_path, name + '.timed-units.xml')
-    tmp_dict = extract_tag_data(ET.parse(tu_path))
+    tmp_dict = extract_tag_data(name, annotation_path)
 
     # Extract time and word annotations for utterences seperated by at least
     # :pause_time (seconds)
@@ -256,3 +262,202 @@ def maptask_to_tacotron(output_path,
     file_g.close()
 
 
+def get_paths():
+    # Assumes maptask dialogue files are downloaded in $dataPath
+    try:
+        full_path = os.path.realpath(__file__)
+        path, filename = os.path.split(full_path)
+    except: # for ipython repl error
+        path = os.path.realpath(os.getcwd())
+    data_path = os.path.realpath(join(path, 'data'))
+    timed_units_path = join(data_path, "maptaskv2-1/Data/timed-units")
+    return {'data_path' : data_path,
+            'annotation_path' : join(data_path, 'maptaskv2-1'),
+            'dialog_path' : join(data_path, 'dialogues'),
+            'mono_path' : join(data_path, 'dialogues_mono'),
+            'gemap_path' : join(data_path, 'gemaps'),
+            'opensmile_path' : os.path.realpath(join(path, '..', '..', 'opensmile/opensmile-2.3.0'))}
+
+
+
+    def create_data_points(session_name, annotation_path, user='f'):
+        print(session_name)
+        # load timed-units.xml
+        timed_units_path = join(annotation_path, 'Data/timed-units')
+        for f in os.listdir(timed_units_path):
+            if session_name in f and '.'+user+'.' in f:
+                print(f)
+                user_data = get_time_filename_utterence(f, annotation_path, pause_time=0.2)
+
+
+
+# ------------------------------------------
+
+def extract_tag_data_from_xml_path(xml_path):
+    '''
+    Extract timed-unit (tu), silence (si) and noise (noi) tags from the
+    .xml annotation file.
+    '''
+    # parse xml
+    xml_element_tree = ET.parse(xml_path)
+
+    tu, words, sil, noi = [], [], [], []
+    for elem in xml_element_tree.iter():
+        try:
+            tmp = (float(elem.attrib['start']), float(elem.attrib['end']))
+        except:
+            continue
+        if elem.tag == 'tu':
+            # elem.attrib: start, end, utt
+            words.append(elem.text)  # word annotation
+            tu.append(tmp)
+        elif elem.tag == 'sil':
+            # elem.attrib: start, end
+            sil.append(tmp)
+        elif elem.tag == 'noi':
+            # elem.attrib: start, end, type='outbreath/lipsmack/...'
+            noi.append(tmp)
+    return {'tu': tu, 'silence': sil, 'noise': noi, 'words': words}
+
+
+def get_timing_utterences(name,
+                          user='f',
+                          pause_time=1,
+                          pre_padding=0,
+                          post_padding=0,
+                          annotation_path=None):
+
+    def merge_pauses(tu, words, threshold=0.1):
+        new_tu, new_words = [], []
+        start, last_end, tmp_words = 0, 0, []
+
+        for i, (t, w) in enumerate(zip(tu, words)):
+            # t[0] - start,  t[1] - end
+            pause_duration = t[0] - last_end
+            if pause_duration > threshold:
+                new_tu.append((start, last_end))
+                new_words.append(tmp_words)
+                tmp_words = [w]
+                start = t[0]
+                last_end = t[1]
+            else:
+                tmp_words.append(w)
+                last_end = t[1]
+        return new_tu[1:], new_words[1:]  # remove first entry which is always zero
+
+    if not annotation_path:
+        annotation_path = get_paths()['annotation_path']
+
+    # load timed-units.xml. Searching through dir.
+    timed_units_path = join(annotation_path, 'Data/timed-units')
+    for file in os.listdir(timed_units_path):
+        if name in file:
+            if '.'+user+'.' in file:
+                xml_path = join(timed_units_path, file)
+
+    data = extract_tag_data_from_xml_path(xml_path)
+    times, words = merge_pauses(data['tu'], data['words'])
+
+    # Pad utterence to include context
+    if pre_padding or post_padding:
+        t = np.array(times)
+        t += (-pre_padding, post_padding)
+        times = t
+
+    samples = librosa.time_to_samples(times, sr=20000)
+
+    return [{'time':time, 'sample': sample, 'words': word} \
+            for time, sample, word in zip(times, samples, words)]
+
+
+def load_dialog(name, dialog_path=None):
+    if not dialog_path:
+        dialog_path = get_paths()['dialog_path']
+    for file in os.listdir(dialog_path):
+        if name in file:
+            if file.endswith('.wav'):
+                return read(join(dialog_path, file))
+
+
+
+def get_data_from_all(session_names):
+    all_sessions_data = []
+    for name in tqdm(session_names):
+        session_data = get_timing_utterences(name,
+                                    user='f',
+                                    pause_time=0.2,
+                                    pre_padding=0,
+                                    post_padding=0)
+        all_sessions_data.append({'name': name, 'data':session_data})
+
+
+def get_backchannel_data(all_sessions_data, utterence_length=1):
+    back_channel_data, vocab = [], {}
+    for session in all_sessions_data:
+        tmp_session_data = []
+        session_data = session['data']
+        for utterence in session_data:
+            utter = utterence['words']
+            if len(utter) <= utterence_length:
+                tmp_session_data.append(utterence)
+                if not utter[0] in counter.keys():
+                    counter[utter[0]] = 1
+                else:
+                    counter[utter[0]] += 1
+        back_channel_data.append({'name': session['name'],
+                                    'data': tmp_session_data})
+    return back_channel_data, counter
+
+
+def listen_to_data(name, session_data):
+    for d in session_data:
+        print(d['words'])
+        t0, t1 = d['time']
+        s0, s1 = d['sample']
+        print('time: {} - {}'.format(t0, t1))
+        print('sample: {} - {}'.format(s0, s1))
+        sr, y = load_dialog(name)
+        sd.play(y[s0:s1])
+        t0, t1 = d['time']
+        duration = t1 - t0
+        time.sleep(duration)
+
+
+
+def test():
+    import matplotlib.pyplot as plt
+    import sounddevice as sd
+    import random
+    import time
+
+    sd.default.samplerate = 20000
+
+    # get_paths()
+    paths = get_paths()
+    dialog_path = paths['dialog_path']
+    annotation_path = paths['annotation_path']
+    mono_path = paths['mono_path']
+    print('dialog path: ', dialog_path)
+    print('annotation path: ', annotation_path)
+    print('mono path: ', mono_path)
+
+
+    # 1.
+    session_names = [fname.split('.')[0] for fname in os.listdir(dialog_path) \
+                     if fname.endswith( '.wav' )]
+
+    # 2.
+    all_sessions_data = get_data_from_all(session_names)
+
+    # 3. back_channels and vocab. Vocab to see what kind of utterences we have.
+    # This should be notebook
+    back_channel_data, vocab = get_backchannel_data(all_sessions_data, 1)
+
+    for sess in back_channel_data:
+        listen_to_data(sess['name'], sess['data'])
+
+    vocab = sorted(vocab.items(), key=lambda t: t[1], reverse=True)
+    vocab[:20]
+
+if __name__ == "__main__":
+    test()

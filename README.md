@@ -9,3 +9,16 @@
   - Contain the code for the various processing.
 * [process\_audio.py](./process_audio.py)
   - Code for actually utilizing the code in `utils.py`
+
+
+
+## Install
+
+1. `conda create -n maptask python=3.6`
+2. `source activate maptask`
+3. `pip install -r requirements.txt`
+
+## Programming utils
+
+[notebook status](/notes/programming.ipynb)
+

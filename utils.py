@@ -153,6 +153,7 @@ def extract_tag_data(name, annotation_path):
     return {'tu': tu, 'silence': sil, 'noise': noi, 'words': words}
 
 
+
 # ------------------------------------------
 
 def get_time_filename_utterence(name, annotation_path, pause_time=1):
@@ -280,14 +281,14 @@ def get_paths():
 
 
 
-    def create_data_points(session_name, annotation_path, user='f'):
-        print(session_name)
-        # load timed-units.xml
-        timed_units_path = join(annotation_path, 'Data/timed-units')
-        for f in os.listdir(timed_units_path):
-            if session_name in f and '.'+user+'.' in f:
-                print(f)
-                user_data = get_time_filename_utterence(f, annotation_path, pause_time=0.2)
+def create_data_points(session_name, annotation_path, user='f'):
+    print(session_name)
+    # load timed-units.xml
+    timed_units_path = join(annotation_path, 'Data/timed-units')
+    for f in os.listdir(timed_units_path):
+        if session_name in f and '.'+user+'.' in f:
+            print(f)
+            user_data = get_time_filename_utterence(f, annotation_path, pause_time=0.2)
 
 
 
@@ -448,7 +449,6 @@ def test():
 
     # 2.
     all_sessions_data = get_data_from_all(session_names)
-
     # 3. back_channels and vocab. Vocab to see what kind of utterences we have.
     # This should be notebook
     back_channel_data, vocab = get_backchannel_data(all_sessions_data, 1)

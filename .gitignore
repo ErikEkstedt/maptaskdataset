@@ -2,3 +2,6 @@ data/*
 .DS_St*
 
 .ipynb*
+smile.log
+
+__pycache__/

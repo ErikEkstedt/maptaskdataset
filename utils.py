@@ -9,6 +9,54 @@ import glob
 import pathlib
 import xml.etree.ElementTree as ET
 
+# ------------------------------------------
+# Actual helper functions
+
+def load_dialog(name, dialog_path=None):
+    if not dialog_path:
+        dialog_path = get_paths()['dialog_path']
+    for file in os.listdir(dialog_path):
+        if name in file:
+            if file.endswith('.wav'):
+                return read(join(dialog_path, file))
+
+
+def listen_to_data(name, session_data):
+    for d in session_data:
+        print(d['words'])
+        t0, t1 = d['time']
+        s0, s1 = d['sample']
+        print('time: {} - {}'.format(t0, t1))
+        print('sample: {} - {}'.format(s0, s1))
+        sr, y = load_dialog(name)
+        sd.play(y[s0:s1])
+        t0, t1 = d['time']
+        duration = t1 - t0
+        time.sleep(duration)
+
+
+def get_paths(root_path=None):
+    # Assumes maptask dialogue files are downloaded in $dataPath
+    if not root_path:
+        try:
+            full_path = os.path.realpath(__file__)
+            root_path, filename = os.path.split(full_path)
+        except: # for ipython repl error
+            print('Assumes this repo is in home directory')
+            root_path = join(os.path.expanduser('~'), 'maptaskdataset')
+    data_path = os.path.realpath(join(root_path, 'data'))
+    return {'data_path' : data_path,
+            'annotation_path' : join(data_path, 'maptaskv2-1'),
+            'dialog_path' : join(data_path, 'dialogues'),
+            'mono_path' : join(data_path, 'dialogues_mono'),
+            'timed_units_path': join(data_path, "maptaskv2-1/Data/timed-units"),
+            'gemap_path' : join(data_path, 'gemaps'),
+            'opensmile_path' : join(os.path.expanduser('~'), 'opensmile-2.3.0')}
+
+
+# ------------------------------------------
+# Early things
+
 def convertStereoToMono(data_path, outputPath, sr=20000):
     if not exists(data_path):
         print('datapath does not exist!')
@@ -155,7 +203,7 @@ def extract_tag_data(name, annotation_path):
 
 
 # ------------------------------------------
-
+# Tacotron
 def get_time_filename_utterence(name, annotation_path, pause_time=1):
     '''
     Arguments
@@ -263,24 +311,6 @@ def maptask_to_tacotron(output_path,
     file_g.close()
 
 
-def get_paths():
-    # Assumes maptask dialogue files are downloaded in $dataPath
-    try:
-        full_path = os.path.realpath(__file__)
-        path, filename = os.path.split(full_path)
-    except: # for ipython repl error
-        path = os.path.realpath(os.getcwd())
-    data_path = os.path.realpath(join(path, 'data'))
-    timed_units_path = join(data_path, "maptaskv2-1/Data/timed-units")
-    return {'data_path' : data_path,
-            'annotation_path' : join(data_path, 'maptaskv2-1'),
-            'dialog_path' : join(data_path, 'dialogues'),
-            'mono_path' : join(data_path, 'dialogues_mono'),
-            'gemap_path' : join(data_path, 'gemaps'),
-            'opensmile_path' : os.path.realpath(join(path, '..', '..', 'opensmile/opensmile-2.3.0'))}
-
-
-
 def create_data_points(session_name, annotation_path, user='f'):
     print(session_name)
     # load timed-units.xml
@@ -291,8 +321,8 @@ def create_data_points(session_name, annotation_path, user='f'):
             user_data = get_time_filename_utterence(f, annotation_path, pause_time=0.2)
 
 
-
 # ------------------------------------------
+
 
 def extract_tag_data_from_xml_path(xml_path):
     '''
@@ -326,7 +356,7 @@ def get_timing_utterences(name,
                           pause_time=1,
                           pre_padding=0,
                           post_padding=0,
-                          annotation_path=None):
+                          timed_units_path=None):
 
     def merge_pauses(tu, words, threshold=0.1):
         new_tu, new_words = [], []
@@ -346,11 +376,10 @@ def get_timing_utterences(name,
                 last_end = t[1]
         return new_tu[1:], new_words[1:]  # remove first entry which is always zero
 
-    if not annotation_path:
-        annotation_path = get_paths()['annotation_path']
+    if not timed_units_path:
+        timed_units_path = get_paths()['timed_units_path']
 
     # load timed-units.xml. Searching through dir.
-    timed_units_path = join(annotation_path, 'Data/timed-units')
     for file in os.listdir(timed_units_path):
         if name in file:
             if '.'+user+'.' in file:
@@ -371,29 +400,8 @@ def get_timing_utterences(name,
             for time, sample, word in zip(times, samples, words)]
 
 
-def load_dialog(name, dialog_path=None):
-    if not dialog_path:
-        dialog_path = get_paths()['dialog_path']
-    for file in os.listdir(dialog_path):
-        if name in file:
-            if file.endswith('.wav'):
-                return read(join(dialog_path, file))
-
-
-
-def get_data_from_all(session_names):
-    all_sessions_data = []
-    for name in tqdm(session_names):
-        session_data = get_timing_utterences(name,
-                                    user='f',
-                                    pause_time=0.2,
-                                    pre_padding=0,
-                                    post_padding=0)
-        all_sessions_data.append({'name': name, 'data':session_data})
-
-
-def get_backchannel_data(all_sessions_data, utterence_length=1):
-    back_channel_data, vocab = [], {}
+def get_utterences(all_sessions_data, utterence_length=1):
+    utterence_data, vocab = [], {}
     for session in all_sessions_data:
         tmp_session_data = []
         session_data = session['data']
@@ -401,63 +409,99 @@ def get_backchannel_data(all_sessions_data, utterence_length=1):
             utter = utterence['words']
             if len(utter) <= utterence_length:
                 tmp_session_data.append(utterence)
-                if not utter[0] in counter.keys():
-                    counter[utter[0]] = 1
+                if not utter[0] in vocab.keys():
+                    vocab[utter[0]] = 1
                 else:
-                    counter[utter[0]] += 1
+                    vocab[utter[0]] += 1
+        utterence_data.append({'name': session['name'],
+                                    'data': tmp_session_data})
+    return utterence_data, vocab
+
+
+# Go through dataset, find all relevant utterences
+
+def get_backchannels_from_vocab(backchannel_vocab):
+    for session in all_sessions_data:
+        tmp_session_data = []
+        session_data = session['data']
+        for utterence in session_data:
+            utter = utterence['words']
+            if len(utter) <= utterence_length:
+                tmp_session_data.append(utterence)
+                if not utter[0] in vocab.keys():
+                    vocab[utter[0]] = 1
+                else:
+                    vocab[utter[0]] += 1
         back_channel_data.append({'name': session['name'],
                                     'data': tmp_session_data})
-    return back_channel_data, counter
+    return back_channel_data, vocab
 
 
-def listen_to_data(name, session_data):
-    for d in session_data:
-        print(d['words'])
-        t0, t1 = d['time']
-        s0, s1 = d['sample']
-        print('time: {} - {}'.format(t0, t1))
-        print('sample: {} - {}'.format(s0, s1))
-        sr, y = load_dialog(name)
-        sd.play(y[s0:s1])
-        t0, t1 = d['time']
-        duration = t1 - t0
-        time.sleep(duration)
-
-
-
-def test():
-    import matplotlib.pyplot as plt
-    import sounddevice as sd
-    import random
-    import time
-
-    sd.default.samplerate = 20000
-
-    # get_paths()
-    paths = get_paths()
-    dialog_path = paths['dialog_path']
-    annotation_path = paths['annotation_path']
-    mono_path = paths['mono_path']
-    print('dialog path: ', dialog_path)
-    print('annotation path: ', annotation_path)
-    print('mono path: ', mono_path)
-
-
-    # 1.
-    session_names = [fname.split('.')[0] for fname in os.listdir(dialog_path) \
-                     if fname.endswith( '.wav' )]
-
-    # 2.
-    all_sessions_data = get_data_from_all(session_names)
-    # 3. back_channels and vocab. Vocab to see what kind of utterences we have.
-    # This should be notebook
-    back_channel_data, vocab = get_backchannel_data(all_sessions_data, 1)
-
-    for sess in back_channel_data:
-        listen_to_data(sess['name'], sess['data'])
-
-    vocab = sorted(vocab.items(), key=lambda t: t[1], reverse=True)
-    vocab[:20]
 
 if __name__ == "__main__":
-    test()
+
+    # PATHS
+    paths = get_paths()
+    print('dialog path: ', paths['dialog_path'])
+    print('annotation path: ', paths['annotation_path'])
+    print('mono path: ', paths['mono_path'])
+
+    session_names = [fname.split('.')[0] for fname in \
+                     os.listdir(paths['dialog_path']) if fname.endswith('.wav')]
+
+    user = 'f'
+    all_f_data = []
+    for name in tqdm(session_names):
+        session_data = get_timing_utterences(name,
+                                             user=user,
+                                             pause_time=0.2,
+                                             pre_padding=0,
+                                             post_padding=0,
+                                             timed_units_path=paths['timed_units_path'])
+        all_f_data.append({'name': name, 'data':session_data})
+
+    user = 'g'
+    all_g_data = []
+    for name in tqdm(session_names):
+        session_data = get_timing_utterences(name,
+                                             user=user,
+                                             pause_time=0.2,
+                                             pre_padding=0,
+                                             post_padding=0,
+                                             timed_units_path=paths['timed_units_path'])
+        all_g_data.append({'name': name, 'data':session_data})
+
+
+    f_small_utterences, f_vocab = get_utterences(all_f_data, utterence_length=1)
+    g_small_utterences, g_vocab = get_utterences(all_g_data, utterence_length=1)
+
+    f_vocab = sorted(f_vocab.items(), key=lambda t: t[1], reverse=True)
+    g_vocab = sorted(g_vocab.items(), key=lambda t: t[1], reverse=True)
+
+    print('Follower Vocab:')
+    for entry in f_vocab[:10]:
+        print(entry)
+
+    print('Guide Vocab:')
+    for entry in g_vocab[:10]:
+        print(entry)
+
+    f_dpoints, f_back = 0, []
+    for i in range(5):
+        f_back.append(f_vocab[i][0])
+        f_dpoints += f_vocab[i][1]
+
+    g_dpoints, g_back = 0, []
+    for i in range(5):
+        g_back.append(g_vocab[i][0])
+        g_dpoints += g_vocab[i][1]
+
+    print('Guide:')
+    print('Datapoints: ', g_dpoints)
+    print('Vocab: ', g_back)
+
+    print('Follower:')
+    print('Datapoints: ', f_dpoints)
+    print('Vocab: ', f_back)
+
+

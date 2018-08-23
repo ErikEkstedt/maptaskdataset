@@ -18,38 +18,32 @@ annotation folder is downloaded locally.
 '''
 
 import os
-from os.path import join
+from os.path import join, exists
+import pathlib
+from utils import get_paths
 
-# Assumes maptask dialogue files are downloaded in $dataPath
-full_path = os.path.realpath(__file__)
-path, filename = os.path.split(full_path)
-data_path = os.path.realpath(join(path, 'data'))
-dialogue_path = join(data_path, 'dialogues')
-mono_path = join(data_path, 'dialogues_mono')
-gemap_path = join(data_path, 'gemaps')
-opensmile_path = os.path.realpath(join(path, '..', '..', 'opensmile/opensmile-2.3.0'))
-
+paths = get_paths()
 
 # 1. Seperate channels in audio.
-convert = input('Convert stero to mono? (y/n)')
+convert = input('Convert stero to mono? (y/n) ')
 if convert == 'y' or convert == 'Y':
     from utils import convertStereoToMono
-    convertStereoToMono(dialogue_path, mono_path, sr=20000)
+    convertStereoToMono(paths['dialogue_path'], paths['mono_path'], sr=20000)
 
 
 # 2. Extract GeMAPs features from monofiles. Write to csv.
-extract = input('Extract GeMAPS from monofiles with OpenSmile? (y/n)')
+extract = input('Extract GeMAPS from monofiles with OpenSmile? (y/n) ')
 if extract == 'y' or extract == 'Y':
     from utils import extractGeMAPS
-    extractGeMAPS(mono_path, gemap_path, opensmile_path)
+    extractGeMAPS(paths['mono_path'], paths['gemap_path'], paths['opensmile_path'])
 
 
 # 3. Maptask -> Tacotron
-extract = input('Reformat Maptask data -> Tacotron data')
+extract = input('Reformat Maptask data -> Tacotron data (y/n) ')
 if extract == 'y' or extract == 'Y':
     from utils import maptask_to_tacotron
-    output_path = join(data_path, 'tacotron_style')
-    timed_units_path = join(data_path, "maptaskv2-1/Data/timed-units")
+
+    output_path = join(paths['data_path'], 'tacotron_style')
 
     if not exists(output_path):
         print('Outputpath does not exist!')
@@ -59,7 +53,7 @@ if extract == 'y' or extract == 'Y':
 
     # Reads
     maptask_to_tacotron(output_path,
-                        timed_units_path,
-                        mono_path,
+                        paths['timed_units_path'],
+                        paths['mono_path'],
                         pause_time=1,
                         sr=20000)

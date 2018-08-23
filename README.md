@@ -1,5 +1,12 @@
 # Maptask
 
+## Install
+
+1. `conda create -n maptask python=3.6`
+2. `source activate maptask`
+3. `pip install -r requirements.txt`
+
+---------------------
 
 * [download-audio.sh](./download-audio.sh)
   - downloads data (wavs and annotation) into the [data](./data/) directory
@@ -9,16 +16,25 @@
   - Contain the code for the various processing.
 * [process\_audio.py](./process_audio.py)
   - Code for actually utilizing the code in `utils.py`
+* [maptaskdata.py](./maptaskdata.py)
 
 
-
-## Install
-
-1. `conda create -n maptask python=3.6`
-2. `source activate maptask`
-3. `pip install -r requirements.txt`
-
-## Programming utils
+## Notebook
 
 [notebook status](/notes/programming.ipynb)
+
+
+## Goal
+
+The goal of this code is to extract backchannel data from the maptask dataset in order
+to train a model to generate backchannels conditioned on audio input. A speech-to-speech
+model that hopefully captures some prosodic nuance and timings for backchannel generation.
+
+1. Merge together utterences defined in one speaker that are seperated less than `$pause`
+2. Get all utterences consisting of only one word. Decide on which one word phrases are
+   constituting a backchannel.
+3. Define how large the `context` is, i.e how many seconds before the backchannel is part of
+   the datapoint.
+4. Extract all backchannels with `context` as audio and text
+5. Save to disk
 

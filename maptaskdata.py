@@ -1,7 +1,7 @@
 import os
+from os.path import join
 from tqdm import tqdm
 from scipy.io.wavfile import read, write
-from os.path import join
 import xml.etree.ElementTree as ET
 from librosa import time_to_samples as librosa_time_to_samples
 
@@ -13,7 +13,56 @@ from torchaudio.transforms import SPECTROGRAM as Spec
 
 from utils import get_paths
 
+
+def listen_to_backchannels(back_channels_list, reverse=False):
+    # for y in reversed(back_channels_list):
+    def _play(y):
+        print(y)
+        print(y['words'])
+        print(y['name'])
+        print(y['user'])
+        audio = y['audio']
+        print(type(audio))
+        print(audio.dtype)
+        user = 1 if y['user'] == 'f' else 0
+        sd.play(audio[:, user])
+        time.sleep(0.5)
+        sd.stop()
+    if reverse:
+        for y in back_channels_list:
+            _play(y)
+    else:
+        for y in back_channels_list:
+            _play(y)
+
+
+
 class Maptask(object):
+    '''
+    This class iterates through the annotations provided by maptask and extracts
+    backchannel uttterences.
+
+    The annotations in the dataset contains words spoken and correlating timings.
+    Utterences from one speaker seperated by less than `pause` are combined to
+    make a longer utterence, a sentence.
+
+    All utterences which only contains one word are extracted and sorted by
+    popularity. From this list of one word utterences the most common ones which
+    are known to be back channels are then extracted.
+
+    As of now this means that the 6 words below make up all utterences in the
+    dataset:
+
+    self.back_channels = ['right', 'okay', 'mmhmm', 'uh-huh', 'yeah', 'mm']
+
+    This class stores all extracted backchannels in a list where each entry in
+    the list is a dict:
+
+        {'name': name, 'time', time, 'sample': sample, 'words': words}
+
+    Here 'name' is the name of the session, 'time' and 'sample' are the timings of
+    the utterence and 'words' is a list of strings.
+    '''
 
     def __init__(self, pause=0.2, pre_padding=0, post_padding=0, max_utterences=1, root=None):
         self.paths = get_paths(root)
@@ -93,13 +142,8 @@ class Maptask(object):
                     xml_path = join(self.paths['timed_units_path'], file)
 
         data = self.extract_tag_data_from_xml_path(xml_path)
-        times, words = self.merge_pauses(data['tu'], data['words'])
 
-        # Pad utterence to include context
-        if self.pre_padding or self.post_padding:
-            t = np.array(times)
-            t += (-pre_padding, post_padding)
-            times = t
+        times, words = self.merge_pauses(data['tu'], data['words'])
 
         samples = librosa_time_to_samples(times, sr=20000)
 
@@ -109,8 +153,6 @@ class Maptask(object):
     def extract_all_short_utterence_from_both_users(self):
         f_data, g_data = [], []
         for name in tqdm(self.session_names):
-            # f_data.append({'name': name, 'data': self.get_timing_utterences(name, user='f')})
-            # g_data.append({'name': name, 'data': self.get_timing_utterences(name, user='g')})
             f_data.append(self.get_timing_utterences(name, user='f'))
             g_data.append(self.get_timing_utterences(name, user='g'))
         return f_data, g_data
@@ -119,7 +161,6 @@ class Maptask(object):
         utterence_data, vocab = [], {}
         for session in data:
             tmp_session_data = []
-            # for utterence in session['data']:
             for utterence in session:
                 utter = utterence['words']
                 if len(utter) <= self.max_utterences:
@@ -129,10 +170,6 @@ class Maptask(object):
                     else:
                         vocab[utter[0]] += 1
             utterence_data.append(tmp_session_data)
-
-            # name is attach in data points instead
-            # utterence_data.append({'name': session['name'],
-            #                             'data': tmp_session_data})
 
         vocab = sorted(vocab.items(), key=lambda t: t[1], reverse=True)
         return utterence_data, vocab
@@ -145,20 +182,6 @@ class Maptask(object):
                 if word in self.back_channels:
                     back_channel_list.append(utter)
         return back_channel_list
-
-    def add_audio_signal_to_back_channel_data(self):
-        for wav in tqdm(os.listdir(self.paths['dialog_path'])):
-            if '.wav' in wav:
-                # y, sr = torchaudio.load(join(maptask.paths['dialog_path'], wav))
-                try:
-                    sr, y = read(join(self.paths['dialog_path'], wav))
-                except:
-                    print(wav)
-                    continue
-                bcs = [f for f in self.back_channel_list if f['name'] in wav]
-                for bc in bcs:
-                    start, end = bc['sample']
-                    bc['audio'] = y[start:end]
 
     def print_vocab(self, top=5):
         f_dpoints, f_back = 0, []
@@ -181,28 +204,6 @@ class Maptask(object):
 
 
 
-def listen_to_backchannels(back_channels_list, reverse=False):
-    # for y in reversed(back_channels_list):
-    def _play(y):
-        print(y)
-        print(y['words'])
-        print(y['name'])
-        print(y['user'])
-        audio = y['audio']
-        print(type(audio))
-        print(audio.dtype)
-        user = 1 if y['user'] == 'f' else 0
-        sd.play(audio[:, user])
-        time.sleep(0.5)
-        sd.stop()
-    if reverse:
-        for y in back_channels_list:
-            _play(y)
-    else:
-        for y in back_channels_list:
-            _play(y)
-
-
 class MaptaskDataset(Dataset):
     # 128 dialogs, 16-bit samples, 20 kHz sample rate, 2 channels per conversation
     def __init__(self,
@@ -216,12 +217,23 @@ class MaptaskDataset(Dataset):
                  n_fft=None,
                  pad=0,
                  n_mels=40,
+                 torch_load_audio=True,
+                 audio=None,
+                 normalize_audio=True,
                  root=None):
         self.maptask = Maptask(pause, pre_padding, post_padding, max_utterences, root)
         self.paths = self.maptask.paths
-        self.audio = self._audio()
-        self.pre_padding = pre_padding
-        self.post_padding = post_padding
+
+        # Audio
+        self.normalize_audio = normalize_audio
+        self.pre_padding = librosa_time_to_samples(pre_padding, sr=sample_rate)
+        self.post_padding = librosa_time_to_samples(post_padding, sr=sample_rate)
+
+        self.torch_load_audio = torch_load_audio
+        if audio:
+            self.audio = audio
+        else:
+            self.audio = self._audio()
 
         # Mel
         self.sample_rate = sample_rate
@@ -232,16 +244,30 @@ class MaptaskDataset(Dataset):
         self.n_mels = n_mels
 
     def _audio(self):
+        '''Iterate through the dialog diractory and extract all .wav files and
+        store in dict'''
         audio = {}
         for wav in tqdm(os.listdir(self.paths['dialog_path'])):
             if '.wav' in wav:
-                try:
-                    sr, y = read(join(self.paths['dialog_path'], wav))
-                    name = wav.split('.')[0]
-                    audio[name] = y
-                except:
-                    # print(wav)
-                    continue
+                fpath = join(self.paths['dialog_path'], wav)
+                name = wav.split('.')[0]  #  q1ec1.mix.wav -> q1ec1
+                if self.torch_load_audio:
+                    try:
+                        if self.norm:
+                            y, sr = torchaudio.load(fpath, normalization=self.norm)
+                        else:
+                            y, sr = torchaudio.load(fpath)
+                        audio[name] = y
+                    except:
+                        # print(wav)
+                        continue
+                else:
+                    try:
+                        sr, y = read(fpath)
+                        audio[name] = y
+                    except:
+                        # print(wav)
+                        continue
         return audio
 
     def __len__(self):
@@ -279,30 +305,30 @@ class MaptaskDataset(Dataset):
         # print(speaker.shape)
         # print(back_channel.shape)
         # print(s.shape)
-
         # print(mel_spec.shape)
         return speaker, back_channel, bc['words']
 
 
+
 if __name__ == "__main__":
 
-    dset = MaptaskDataset()
-    print(len(dset))
-    speaker, bc, bc_word = dset[3]
+    dset = MaptaskDataset(pause=0.1, max_utterences=1)
 
-    print(speaker)
-    print(bc)
-    print(bc_word)
+    audio = dset.audio
+
+    ds = MaptaskDataset(pause=0.1, max_utterences=1, audio=audio)
+
+
+    dset = MaptaskDataset(pause=0.1, max_utterences=1)
+    speaker, bc, bc_word = dset[3]
+    print('speaker: ', len(speaker), type(speaker))
+    print('backchannel audio: ', len(bc), type(bc))
+    print('word: ', bc_word)
+
+    mel = MelSpectrogram()
+    mel(bc)
+
     print(type(speaker))
     print(type(bc))
     print(type(bc_word))
 
-    # dloader = DataLoader(dset, num_workers=4, batch_size=64)
-    # for speaker, bc, bc_word in dloader:
-    #     print(speaker.shape)
-    #     print(bc.shape)
-
-    # Spectrogram = Spec()
-    # S = Spectrogram(g)
-    # print('S.shape', S.shape)
-    # print('S.shape', S.shape)

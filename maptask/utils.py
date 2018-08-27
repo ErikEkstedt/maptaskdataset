@@ -2,13 +2,16 @@ from os.path import join, exists
 from scipy.io.wavfile import read, write
 from subprocess import call
 from tqdm import tqdm
+import glob
 import librosa
+import matplotlib.pyplot as plt
 import numpy as np
 import os
-import glob
 import pathlib
+import time
 import xml.etree.ElementTree as ET
 
+import torchaudio
 # ------------------------------------------
 # Actual helper functions
 
@@ -52,6 +55,60 @@ def get_paths(root_path=None):
             'timed_units_path': join(data_path, "maptaskv2-1/Data/timed-units"),
             'gemap_path' : join(data_path, 'gemaps'),
             'opensmile_path' : join(os.path.expanduser('~'), 'opensmile-2.3.0')}
+
+
+def load_audio(path, torch_load_audio=True, norm=True):
+    '''Iterate through the dialog directory and extract all .wav files and store in dict'''
+    audio = {}
+    for wav in tqdm(os.listdir(path)):
+        if '.wav' in wav:
+            fpath = join(path, wav)
+            name = wav.split('.')[0]  #  q1ec1.mix.wav -> q1ec1
+            y = None
+            if torch_load_audio:
+                try:
+                    y, sr = torchaudio.load(fpath)
+                except:
+                    print('Error', wav)
+                    continue
+            else:
+                try:
+                    sr, y = read(fpath)
+                except:
+                    print('Error', wav)
+                    continue
+            if y is not None:
+                if norm:
+                    y /= y.max()
+                audio[name] = y
+    return audio
+
+
+def visualize_backchannel(speaker, backchannel, pause=False):
+    s = speaker.numpy()
+    bc = backchannel.numpy()
+    print('Speaker length: ', len(s))
+    print('Backchannel length: ', len(bc))
+    plt.figure('Backchannel')
+    plt.subplot(2,1,1)
+    plt.title('Speaker')
+    plt.plot(s)
+    plt.subplot(2,1,2)
+    plt.title('Backchannel')
+    plt.plot(bc)
+    if pause:
+        plt.pause(0.1)
+    else:
+        plt.show()
+
+def sound_backchannel(speaker, backchannel, sr=20000):
+    sd.default.samplerate = sr
+    s = speaker.numpy()
+    bc = backchannel.numpy()
+    audio = np.vstack((s, bc)).T
+    sd.play(audio)
+    time.sleep(librosa.get_duration(audio, sr=20000))
+
 
 
 # ------------------------------------------
@@ -199,7 +256,6 @@ def extract_tag_data(name, annotation_path):
             # elem.attrib: start, end, type='outbreath/lipsmack/...'
             noi.append(tmp)
     return {'tu': tu, 'silence': sil, 'noise': noi, 'words': words}
-
 
 
 # ------------------------------------------

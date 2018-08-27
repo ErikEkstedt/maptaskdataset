@@ -11,31 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchaudio.transforms import MEL2 as MelSpectrogram
 from torchaudio.transforms import SPECTROGRAM as Spec
 
-from utils import get_paths
-
-
-def listen_to_backchannels(back_channels_list, reverse=False):
-    # for y in reversed(back_channels_list):
-    def _play(y):
-        print(y)
-        print(y['words'])
-        print(y['name'])
-        print(y['user'])
-        audio = y['audio']
-        print(type(audio))
-        print(audio.dtype)
-        user = 1 if y['user'] == 'f' else 0
-        sd.play(audio[:, user])
-        time.sleep(0.5)
-        sd.stop()
-    if reverse:
-        for y in back_channels_list:
-            _play(y)
-    else:
-        for y in back_channels_list:
-            _play(y)
-
-
+from utils import get_paths, load_audio, visualize_backchannel, sound_backchannel
 
 class Maptask(object):
     '''
@@ -203,7 +179,6 @@ class Maptask(object):
         print('-'*50)
 
 
-
 class MaptaskDataset(Dataset):
     # 128 dialogs, 16-bit samples, 20 kHz sample rate, 2 channels per conversation
     def __init__(self,
@@ -233,7 +208,9 @@ class MaptaskDataset(Dataset):
         if audio:
             self.audio = audio
         else:
-            self.audio = self._audio()
+            self.audio = load_audio(self.paths['dialog_path'],
+                                    self.torch_load_audio,
+                                    self.normalize_audio)
 
         # Mel
         self.sample_rate = sample_rate
@@ -243,33 +220,6 @@ class MaptaskDataset(Dataset):
         self.pad = pad
         self.n_mels = n_mels
 
-    def _audio(self):
-        '''Iterate through the dialog diractory and extract all .wav files and
-        store in dict'''
-        audio = {}
-        for wav in tqdm(os.listdir(self.paths['dialog_path'])):
-            if '.wav' in wav:
-                fpath = join(self.paths['dialog_path'], wav)
-                name = wav.split('.')[0]  #  q1ec1.mix.wav -> q1ec1
-                if self.torch_load_audio:
-                    try:
-                        if self.norm:
-                            y, sr = torchaudio.load(fpath, normalization=self.norm)
-                        else:
-                            y, sr = torchaudio.load(fpath)
-                        audio[name] = y
-                    except:
-                        # print(wav)
-                        continue
-                else:
-                    try:
-                        sr, y = read(fpath)
-                        audio[name] = y
-                    except:
-                        # print(wav)
-                        continue
-        return audio
-
     def __len__(self):
         return len(self.maptask.back_channel_list)
 
@@ -277,11 +227,11 @@ class MaptaskDataset(Dataset):
         bc = self.maptask.back_channel_list[idx]
         start, end = bc['sample']
 
-        start -= self.pre_padding
-        end += self.post_padding
+        # transform time-padding -> sample-padding and add to start, end
+        start -= librosa_time_to_samples(self.pre_padding, sr=self.sample_rate)
+        end += librosa_time_to_samples(self.post_padding, sr=self.sample_rate)
 
         # TODO
-        # get correct audio tracks
         # Should also extract words of speaker not only backchannel
         y = self.audio[bc['name']]
         if bc['user'] == 'f':
@@ -309,26 +259,25 @@ class MaptaskDataset(Dataset):
         return speaker, back_channel, bc['words']
 
 
-
 if __name__ == "__main__":
 
     dset = MaptaskDataset(pause=0.1, max_utterences=1)
 
     audio = dset.audio
 
-    ds = MaptaskDataset(pause=0.1, max_utterences=1, audio=audio)
+    dset = MaptaskDataset(pause=0.1, max_utterences=1, audio=audio)
 
+    dset.pre_padding = 1  # two seconds before backchannel
 
-    dset = MaptaskDataset(pause=0.1, max_utterences=1)
-    speaker, bc, bc_word = dset[3]
+    speaker, bc, bc_word = dset[1500]
     print('speaker: ', len(speaker), type(speaker))
     print('backchannel audio: ', len(bc), type(bc))
     print('word: ', bc_word)
 
-    mel = MelSpectrogram()
-    mel(bc)
+    visualize_backchannel(speaker, bc, pause=True)
 
-    print(type(speaker))
-    print(type(bc))
-    print(type(bc_word))
+    sound_backchannel(speaker, bc)
 
+    # ds = MaptaskDataset(pause=0.1, max_utterences=1, audio=audio)
+    # mel = MelSpectrogram()
+    # mel(bc)

@@ -11,7 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchaudio.transforms import MEL2 as MelSpectrogram
 from torchaudio.transforms import SPECTROGRAM as Spec
 
-from utils import get_paths, load_audio, visualize_backchannel, sound_backchannel
+from maptask.utils import get_paths, load_audio, visualize_datapoint, sound_datapoint
 
 class Maptask(object):
     '''
@@ -40,13 +40,11 @@ class Maptask(object):
     the utterence and 'words' is a list of strings.
     '''
 
-    def __init__(self, pause=0.2, pre_padding=0, post_padding=0, max_utterences=1, root=None):
+    def __init__(self, pause=0.2, max_utterences=1, root=None):
         self.paths = get_paths(root)
         self.session_names = self._session_names()
 
         self.pause = pause
-        self.pre_padding = pre_padding
-        self.post_padding = post_padding
         self.max_utterences = max_utterences
         self.back_channels = ['right', 'okay', 'mmhmm', 'uh-huh', 'yeah', 'mm']
 
@@ -180,15 +178,14 @@ class Maptask(object):
 
 
 class MaptaskDataset(Dataset):
-    # 128 dialogs, 16-bit samples, 20 kHz sample rate, 2 channels per conversation
+    ''' 128 dialogs, 16-bit samples, 20 kHz sample rate, 2 channels per conversation '''
     def __init__(self,
                  pause=0.5,
-                 pre_padding=0,
-                 post_padding=0,
+                 context=0,
                  max_utterences=1,
                  sample_rate=20000,
-                 window_size=50,
-                 hop_length=None,
+                 window_size=512,
+                 hop_length=256,
                  n_fft=None,
                  pad=0,
                  n_mels=40,
@@ -196,21 +193,8 @@ class MaptaskDataset(Dataset):
                  audio=None,
                  normalize_audio=True,
                  root=None):
-        self.maptask = Maptask(pause, pre_padding, post_padding, max_utterences, root)
+        self.maptask = Maptask(pause, max_utterences, root)
         self.paths = self.maptask.paths
-
-        # Audio
-        self.normalize_audio = normalize_audio
-        self.pre_padding = librosa_time_to_samples(pre_padding, sr=sample_rate)
-        self.post_padding = librosa_time_to_samples(post_padding, sr=sample_rate)
-
-        self.torch_load_audio = torch_load_audio
-        if audio:
-            self.audio = audio
-        else:
-            self.audio = load_audio(self.paths['dialog_path'],
-                                    self.torch_load_audio,
-                                    self.normalize_audio)
 
         # Mel
         self.sample_rate = sample_rate
@@ -220,6 +204,23 @@ class MaptaskDataset(Dataset):
         self.pad = pad
         self.n_mels = n_mels
 
+        self.mel_spec = MelSpectrogram(sr=self.sample_rate,
+                                       ws=self.window_size,
+                                       hop=self.hop_length,
+                                       n_fft=self.n_fft,
+                                       pad=self.pad,
+                                       n_mels=self.n_mels)
+        # Audio
+        self.normalize_audio = normalize_audio
+        self.context = context
+        self.torch_load_audio = torch_load_audio
+        if audio:
+            self.audio = audio
+        else:
+            self.audio = load_audio(self.paths['dialog_path'],
+                                    self.torch_load_audio,
+                                    self.normalize_audio)
+
     def __len__(self):
         return len(self.maptask.back_channel_list)
 
@@ -228,56 +229,146 @@ class MaptaskDataset(Dataset):
         start, end = bc['sample']
 
         # transform time-padding -> sample-padding and add to start, end
-        start -= librosa_time_to_samples(self.pre_padding, sr=self.sample_rate)
-        end += librosa_time_to_samples(self.post_padding, sr=self.sample_rate)
+        
+        context_start = start - librosa_time_to_samples(self.context, sr=self.sample_rate)
+        context_end = start
 
-        # TODO
-        # Should also extract words of speaker not only backchannel
-        y = self.audio[bc['name']]
+        # TODO: Should also extract words of speaker not only backchannel
+        y = self.audio[bc['name']]  # load correct audio array
         if bc['user'] == 'f':
-            speaker = y[start:end, 0]
+            # back channel generator is 'f'
+            context = y[context_start:context_end, 0]
+            self_context = y[context_start:context_end, 1]
             back_channel = y[start:end,1]
         else:
-            speaker = y[1, start:end]
-            back_channel = y[0, start:end]
+            # back channel generator is 'g'
+            context = y[context_start:context_end, 1]
+            self_context = y[context_start:context_end, 0]
 
-        # TODO
-        # Make audio torch.Tensor (quantify)
-        # Spectrogram
-        # mel_spec = MelSpectrogram(sr=self.sample_rate,
-        #                           ws=self.window_size,
-        #                           hop=self.hop_length,
-        #                           n_fft=self.n_fft,
-        #                           pad=self.pad,
-        #                           n_mels=self.n_mels)
+            back_channel = y[start:end,0]
 
-        # s = mel_spec(torch.tensor(speaker)
-        # print(speaker.shape)
-        # print(back_channel.shape)
-        # print(s.shape)
-        # print(mel_spec.shape)
-        return speaker, back_channel, bc['words']
+        # Context
+        context_spec = self.mel_spec(context.unsqueeze(0))
+        self_context_spec = self.mel_spec(self_context.unsqueeze(0))
+
+        # Target - backchannel
+        bc_spec = self.mel_spec(back_channel.unsqueeze(0))
+
+        return {'context_audio': context,
+                'context_spec': context_spec,
+                'self_context_audio': self_context,
+                'self_context_spec': self_context_spec,
+                'back_channel_audio': back_channel,
+                'back_channel_spec': bc_spec,
+                'back_channel_word': bc['words'][0]}
+
+    def get_item(self, idx):
+        bc = self.maptask.back_channel_list[idx]
+        start, end = bc['sample']
+
+        # transform time-padding -> sample-padding and add to start, end
+        context_start = start - self.context
+        context_end = start
+
+        # TODO: Should also extract words of speaker not only backchannel
+        y = self.audio[bc['name']]  # load correct audio array
+        if bc['user'] == 'f':
+            # back channel generator is 'f'
+            context = y[context_start:context_end, 0]
+            self_context = y[context_start:context_end, 1]
+
+            back_channel = y[start:end,1]
+        else:
+            # back channel generator is 'g'
+            context = y[context_start:context_end, 1]
+            self_context = y[context_start:context_end, 0]
+
+            back_channel = y[start:end,0]
+
+        # Context
+        context_spec = self.mel_spec(context.unsqueeze(0))
+        self_context_spec = self.mel_spec(self_context.unsqueeze(0))
+
+        # Target - backchannel
+        bc_spec = self.mel_spec(back_channel.unsqueeze(0))
+
+        return {'context_audio': context,
+                'context_spec': context_spec,
+                'self_context_audio': self_context,
+                'self_context_spec': self_context_spec,
+                'back_channel_audio': back_channel,
+                'back_channel_spec': bc_spec,
+                'back_channel_word': bc['words'][0]}
+
+
+# -------- UTILS -------------
+
+def vis_and_listen(dset, idx=None):
+    if not idx:
+        idx = random.randint(0, len(dset))
+    output = dset[idx]
+    print('Length and type: ')
+    print('Speaker: ', len(output['speaker_audio']), type(output['speaker_audio']))
+    print('Backchannel audio: ', len(output['back_channel_audio']), type(output['back_channel_spec']))
+    print('Word: ', output['back_channel_word'])
+    visualize_backchannel(output['speaker_audio'], output['back_channel_audio'], pause=True)
+    sound_backchannel(output['speaker_audio'], output['back_channel_audio'])
+
 
 
 if __name__ == "__main__":
+    import random
+    import librosa.display
+    import matplotlib.pyplot as plt
+    import sounddevice as sd
+    import numpy as np
+    import time
 
     dset = MaptaskDataset(pause=0.1, max_utterences=1)
-
     audio = dset.audio
 
-    dset = MaptaskDataset(pause=0.1, max_utterences=1, audio=audio)
+    # for reusing audio in REPL
+    dset = MaptaskDataset(pause=0.1, max_utterences=1, context=2, audio=audio)
 
-    dset.pre_padding = 1  # two seconds before backchannel
+    dset.context = 2  # seconds before backchannel
 
-    speaker, bc, bc_word = dset[1500]
-    print('speaker: ', len(speaker), type(speaker))
-    print('backchannel audio: ', len(bc), type(bc))
-    print('word: ', bc_word)
+    # vis_and_listen(dset) # listen to random
+    # vis_and_listen(dset, idx=10) # listen to backchannel 10
 
-    visualize_backchannel(speaker, bc, pause=True)
+    # Some output contains only zeros. Probably the broken file (use
+    # scipy.io.wavfile.read, to spot)
+    idx = 800  # 800, 888 is good and clear
+    output = dset[idx]
 
-    sound_backchannel(speaker, bc)
+    while True:
+        idx = random.randint(0, len(dset))
+        output = dset[idx]
+        # visualize_datapoint(output)
+        sound_datapoint(output)
+        ans = input('Press n for quit')
+        if ans == 'n':
+            break
 
-    # ds = MaptaskDataset(pause=0.1, max_utterences=1, audio=audio)
-    # mel = MelSpectrogram()
-    # mel(bc)
+
+
+    sound_datapoint(output, True)
+
+
+    def sound_datapoint(output, with_self_context=False, sr=20000):
+        sd.default.samplerate = sr
+        context = output['context_audio'].numpy()
+        bc = output['back_channel_audio'].numpy()
+        bc_word = output['back_channel_word']
+        print('context audio: ', context.shape)
+        if with_self_context:
+            self_context = output['self_context_audio'].numpy()
+            audio = np.vstack((self_context, context)).T
+            sd.play(audio)
+            time.sleep(librosa.get_duration(context, sr=20000))
+        else:
+            sd.play(context)
+            time.sleep(librosa.get_duration(context, sr=20000))
+        print('BC audio: ', bc_word)
+        sd.play(bc)
+        time.sleep(librosa.get_duration(bc, sr=20000))
+

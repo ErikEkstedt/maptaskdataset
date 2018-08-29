@@ -36,5 +36,5 @@ model that hopefully captures some prosodic nuance and timings for backchannel g
 3. Define how large the `context` is, i.e how many seconds before the backchannel is part of
    the datapoint.
 4. Extract all backchannels with `context` as audio and text
-5. Save to disk
+5. Save to disk (?)
 

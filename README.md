@@ -5,6 +5,7 @@
 1. `conda create -n maptask python=3.6`
 2. `source activate maptask`
 3. `pip install -r requirements.txt`
+4. `cd` into root of repo and `pip install -e .`
 
 ---------------------
 
@@ -21,10 +22,10 @@
 
 ## Notebook
 
-[notebook status](/notes/programming.ipynb)
+[notebook status](https://github.com/ErikEkstedt/maptaskdataset/blob/master/maptask/notes/programming.ipynb)
 
 
-## Goal
+## Step 1
 
 The goal of this code is to extract backchannel data from the maptask dataset in order
 to train a model to generate backchannels conditioned on audio input. A speech-to-speech
@@ -36,5 +37,6 @@ model that hopefully captures some prosodic nuance and timings for backchannel g
 3. Define how large the `context` is, i.e how many seconds before the backchannel is part of
    the datapoint.
 4. Extract all backchannels with `context` as audio and text
-5. Save to disk (?)
+5. [x] Create PyTorch Dataset and DataLoader
+
 

@@ -4,6 +4,8 @@ from tqdm import tqdm
 from scipy.io.wavfile import read, write
 import xml.etree.ElementTree as ET
 from librosa import time_to_samples as librosa_time_to_samples
+from librosa import samples_to_frames as librosa_samples_to_frames
+import numpy as np
 
 import torch
 import torchaudio
@@ -13,6 +15,24 @@ from torchaudio.transforms import SPECTROGRAM as Spec
 
 from maptask.utils import get_paths, load_audio, visualize_datapoint, sound_datapoint
 
+# Using scipy read -> Error: q6ec2.mix.wav
+# Removing q6ec2 it is corrupt
+
+# -------- UTILS -------------
+
+def vis_and_listen(dset, idx=None):
+    if not idx:
+        idx = random.randint(0, len(dset))
+    output = dset[idx]
+    print('Length and type: ')
+    print('Speaker: ', len(output['speaker_audio']), type(output['speaker_audio']))
+    print('Backchannel audio: ', len(output['back_channel_audio']), type(output['back_channel_spec']))
+    print('Word: ', output['back_channel_word'])
+    visualize_backchannel(output['speaker_audio'], output['back_channel_audio'], pause=True)
+    sound_backchannel(output['speaker_audio'], output['back_channel_audio'])
+
+
+# Dataset
 class Maptask(object):
     '''
     This class iterates through the annotations provided by maptask and extracts
@@ -181,9 +201,10 @@ class MaptaskDataset(Dataset):
     ''' 128 dialogs, 16-bit samples, 20 kHz sample rate, 2 channels per conversation '''
     def __init__(self,
                  pause=0.5,
-                 context=0,
+                 context=2,
                  max_utterences=1,
                  sample_rate=20000,
+                 use_spectrogram=True,
                  window_size=512,
                  hop_length=256,
                  n_fft=None,
@@ -197,6 +218,7 @@ class MaptaskDataset(Dataset):
         self.paths = self.maptask.paths
 
         # Mel
+        self.use_spectrogram = use_spectrogram
         self.sample_rate = sample_rate
         self.window_size = window_size
         self.hop_length = hop_length
@@ -228,92 +250,109 @@ class MaptaskDataset(Dataset):
         bc = self.maptask.back_channel_list[idx]
         start, end = bc['sample']
 
-        # transform time-padding -> sample-padding and add to start, end
-        
-        context_start = start - librosa_time_to_samples(self.context, sr=self.sample_rate)
-        context_end = start
+        n_samples = librosa_time_to_samples(self.context, sr=self.sample_rate)
+        context = torch.zeros(n_samples)
+        back_channel = torch.zeros(n_samples)
 
-        # TODO: Should also extract words of speaker not only backchannel
+        # Find start of context => 0
+        context_start = end - n_samples
+        if context_start < 0:
+            context_start = 0
+
         y = self.audio[bc['name']]  # load correct audio array
         if bc['user'] == 'f':
             # back channel generator is 'f'
-            context = y[context_start:context_end, 0]
-            self_context = y[context_start:context_end, 1]
-            back_channel = y[start:end,1]
+            tmp_context = y[context_start:end, 0]
+            tmp_back_channel = y[context_start:end, 1]
         else:
             # back channel generator is 'g'
-            context = y[context_start:context_end, 1]
-            self_context = y[context_start:context_end, 0]
+            tmp_context = y[context_start:end, 1]
+            tmp_back_channel = y[context_start:end,0]
 
-            back_channel = y[start:end,0]
+        # Ones where the actual backchannel is, zero on "self context"
+        n_samples_bc = end - start
+        back_channel_class = torch.zeros(back_channel.shape)
+        back_channel_class[-n_samples_bc:] = 1
 
-        # Context
-        context_spec = self.mel_spec(context.unsqueeze(0))
-        self_context_spec = self.mel_spec(self_context.unsqueeze(0))
+        # Spectrograms
+        if self.use_spectrogram:
+            context_spec = self.mel_spec(context.unsqueeze(0)).squeeze(0)
+            back_channel_spec = self.mel_spec(back_channel.unsqueeze(0)).squeeze(0)
 
-        # Target - backchannel
-        bc_spec = self.mel_spec(back_channel.unsqueeze(0))
+            bc_frames = librosa_samples_to_frames(n_samples_bc, hop_length=self.hop_length)
+            back_channel_spec_class = torch.zeros(back_channel_spec.shape[0])
+            back_channel_spec_class[-bc_frames:] = 1
 
-        return {'context_audio': context,
-                'context_spec': context_spec,
-                'self_context_audio': self_context,
-                'self_context_spec': self_context_spec,
-                'back_channel_audio': back_channel,
-                'back_channel_spec': bc_spec,
-                'back_channel_word': bc['words'][0]}
-
-    def get_item(self, idx):
-        bc = self.maptask.back_channel_list[idx]
-        start, end = bc['sample']
-
-        # transform time-padding -> sample-padding and add to start, end
-        context_start = start - self.context
-        context_end = start
-
-        # TODO: Should also extract words of speaker not only backchannel
-        y = self.audio[bc['name']]  # load correct audio array
-        if bc['user'] == 'f':
-            # back channel generator is 'f'
-            context = y[context_start:context_end, 0]
-            self_context = y[context_start:context_end, 1]
-
-            back_channel = y[start:end,1]
+            return {'context_audio': context,
+                    'context_spec': context_spec,
+                    'back_channel_audio': back_channel,
+                    'back_channel_spec': back_channel_spec,
+                    'back_channel_class': back_channel_class,
+                    'back_channel_spec_class': back_channel_spec_class,
+                    'back_channel_word': bc['words'][0]}
         else:
-            # back channel generator is 'g'
-            context = y[context_start:context_end, 1]
-            self_context = y[context_start:context_end, 0]
-
-            back_channel = y[start:end,0]
-
-        # Context
-        context_spec = self.mel_spec(context.unsqueeze(0))
-        self_context_spec = self.mel_spec(self_context.unsqueeze(0))
-
-        # Target - backchannel
-        bc_spec = self.mel_spec(back_channel.unsqueeze(0))
-
-        return {'context_audio': context,
-                'context_spec': context_spec,
-                'self_context_audio': self_context,
-                'self_context_spec': self_context_spec,
-                'back_channel_audio': back_channel,
-                'back_channel_spec': bc_spec,
-                'back_channel_word': bc['words'][0]}
+            return {'context_audio': context,
+                    'back_channel_audio': back_channel,
+                    'back_channel_class': back_channel_class,
+                    'back_channel_word': bc['words'][0]}
 
 
-# -------- UTILS -------------
+# DataLoaders
+class MaptaskAudioDataloader(DataLoader):
+    def __init__(self, dset, batch_size, pred, seq_len, overlap_len, *args, **kwargs):
+        super().__init__(dset, batch_size, *args, **kwargs)
+        self.seq_len = seq_len
+        self.overlap_len = overlap_len
+        self.pred = pred
 
-def vis_and_listen(dset, idx=None):
-    if not idx:
-        idx = random.randint(0, len(dset))
-    output = dset[idx]
-    print('Length and type: ')
-    print('Speaker: ', len(output['speaker_audio']), type(output['speaker_audio']))
-    print('Backchannel audio: ', len(output['back_channel_audio']), type(output['back_channel_spec']))
-    print('Word: ', output['back_channel_word'])
-    visualize_backchannel(output['speaker_audio'], output['back_channel_audio'], pause=True)
-    sound_backchannel(output['speaker_audio'], output['back_channel_audio'])
+    def __iter__(self):
+        for batch in super().__iter__():
+            # batch['back_channel_audio'].shape)
+            # batch['context_audio'].shape)
+            # batch['back_channel_class'].shape)
+            (batch_size, n_samples) = batch['back_channel_audio'].shape
 
+            reset = True
+            for seq_begin in range(self.overlap_len, n_samples, self.seq_len):
+                start = seq_begin - self.overlap_len
+                end = seq_begin + self.seq_len
+
+                bc_seq = batch['back_channel_audio'][:, start:end]
+                context_seq = batch['context_audio'][:, start:end]
+                input_seq = (context_seq[:,:-self.pred], bc_seq[:,:-self.pred])
+                target_seq = bc_seq[:, self.overlap_len:].contiguous()
+                yield (input_seq, reset, target_seq)
+                reset = False
+
+
+class MaptaskSpecDataloader(DataLoader):
+    def __init__(self, dset, batch_size, pred, seq_len, overlap_len, *args, **kwargs):
+        super().__init__(dset, batch_size, *args, **kwargs)
+        self.seq_len = seq_len
+        self.overlap_len = overlap_len
+        self.pred = pred
+
+    def __iter__(self):
+        for batch in super().__iter__():
+            # batch['context_spec'].shape
+            # batch['back_channel_spec'].shape
+            # batch['back_channel_spec_class'].shape
+            (batch_size, n_frames, features) = batch['back_channel_spec'].shape
+
+            reset = True
+            for seq_begin in range(self.overlap_len, n_frames, self.seq_len):
+                start = seq_begin - self.overlap_len
+                end = seq_begin + self.seq_len
+
+                bc_seq = batch['back_channel_spec'][:, start:end]
+                bc_class = batch['back_channel_spec_class'][:, start:end]
+                context_seq = batch['context_spec'][:, start:end]
+
+                input_seq = (context_seq[:,:-self.pred], bc_seq[:,:-self.pred])
+                target_seq = bc_seq[:, self.overlap_len:].contiguous()
+                target_class = bc_class[:, self.overlap_len:].contiguous()
+                yield (input_seq, reset, target_seq, target_class)
+                reset = False
 
 
 if __name__ == "__main__":
@@ -324,51 +363,50 @@ if __name__ == "__main__":
     import numpy as np
     import time
 
+    print('Creating Dataset and loading audio')
     dset = MaptaskDataset(pause=0.1, max_utterences=1)
     audio = dset.audio
 
     # for reusing audio in REPL
-    dset = MaptaskDataset(pause=0.1, max_utterences=1, context=2, audio=audio)
+    dset = MaptaskDataset(pause=0.5, max_utterences=1, context=2, audio=audio)
 
-    dset.context = 2  # seconds before backchannel
-
-    # vis_and_listen(dset) # listen to random
-    # vis_and_listen(dset, idx=10) # listen to backchannel 10
-
-    # Some output contains only zeros. Probably the broken file (use
-    # scipy.io.wavfile.read, to spot)
-    idx = 800  # 800, 888 is good and clear
-    output = dset[idx]
-
-    while True:
-        idx = random.randint(0, len(dset))
-        output = dset[idx]
-        # visualize_datapoint(output)
-        sound_datapoint(output)
+    print('Audio: DataLoader')
+    maploader = MaptaskAudioDataloader(dset, pred=3, seq_len=300, overlap_len=100, batch_size=128, num_workers=4)
+    for batch in maploader:
+        print(type(batch))
+        print(batch[0][0].shape)
+        print(batch[0][1].shape)
+        print(batch[1])
+        print(batch[2].shape)
         ans = input('Press n for quit')
         if ans == 'n':
             break
 
+    print('Spectrogram: DataLoader')
+    maploader = MaptaskSpecDataloader(dset, pred=1, seq_len=10, overlap_len=2, batch_size=128, num_workers=4)
+    for batch in maploader:
+        print(type(batch))
+        print(batch[0][0].shape)
+        print(batch[0][1].shape)
+        print(batch[1])
+        print(batch[2].shape)
+        print(batch[3].shape)
+        ans = input('Press n for quit')
+        if ans == 'n':
+            break
 
+    # ---------------------------------------------------------------------
+    # Some output contains only zeros. Probably the broken file (use
+    # scipy.io.wavfile.read, to spot)
+    # idx = 800  # 800, 888 is good and clear
+    # output = dset[idx]
 
-    sound_datapoint(output, True)
-
-
-    def sound_datapoint(output, with_self_context=False, sr=20000):
-        sd.default.samplerate = sr
-        context = output['context_audio'].numpy()
-        bc = output['back_channel_audio'].numpy()
-        bc_word = output['back_channel_word']
-        print('context audio: ', context.shape)
-        if with_self_context:
-            self_context = output['self_context_audio'].numpy()
-            audio = np.vstack((self_context, context)).T
-            sd.play(audio)
-            time.sleep(librosa.get_duration(context, sr=20000))
-        else:
-            sd.play(context)
-            time.sleep(librosa.get_duration(context, sr=20000))
-        print('BC audio: ', bc_word)
-        sd.play(bc)
-        time.sleep(librosa.get_duration(bc, sr=20000))
-
+    print('Listen to audio datapoints')
+    while True:
+        idx = random.randint(0, len(dset))
+        output = dset[idx]
+        visualize_datapoint(output)
+        sound_datapoint(output)
+        ans = input('Press n for quit')
+        if ans == 'n':
+            break

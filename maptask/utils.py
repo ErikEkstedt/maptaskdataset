@@ -78,10 +78,12 @@ def load_audio(path, torch_load_audio=True, norm=True):
                 except:
                     print('Error', wav)
                     continue
-            if y is not None:
-                if norm:
-                    y /= y.max()
-                audio[name] = y
+            if y.nelement()==0:
+                print('Empty Tensor')
+                print(name)
+            if norm:
+                y /= y.max()
+            audio[name] = y
     return audio
 
 
@@ -89,51 +91,37 @@ def visualize_datapoint(output, verbose=True, pause=True):
     context = output['context_audio'].numpy()
     context_spec = output['context_spec'].squeeze(0).numpy()
 
-    self_context = output['self_context_audio'].numpy()
-    self_context_spec = output['self_context_spec'].squeeze(0).numpy()
+    back_channel = output['back_channel_audio'].numpy()
+    back_channel_spec = output['back_channel_spec'].squeeze(0).numpy()
 
-    bc = output['back_channel_audio'].numpy()
-    bc_spec = output['back_channel_spec'].squeeze(0).numpy()
-    bc_word = output['back_channel_word']
+    back_channel_class = output['back_channel_class'].numpy()
+    back_channel_word = output['back_channel_word']
 
-    if verbose:
-        print('Context shape: ', len(context.shape))
-        print('Context Spec shape: ', context_spec.shape)
-        print('self_context shape: ', len(self_context.shape))
-        print('self_context Spec shape: ', self_context_spec.shape)
-        print('BC shape: ', len(bc))
-        print('BC Spec shape: ', bc_spec.shape)
-        print('BC: ', bc_word)
+    plt.figure('Backchannel'+'-'+back_channel_word)
 
-    plt.figure('Backchannel'+'-'+bc_word)
-
-    plt.subplot(6,1,1)
+    plt.subplot(5,1,1)
     plt.title('Context')
     plt.plot(context)
     plt.xlim(0, len(context))
 
-    plt.subplot(6,1,2)
+    plt.subplot(5,1,2)
     plt.title('Context Spec')
     librosa.display.specshow(data=context_spec.T, sr=20000, y_axis='mel')
 
-    plt.subplot(6,1,3)
-    plt.title('self_context')
-    plt.plot(self_context)
-    plt.xlim(0, len(self_context))
-
-    plt.subplot(6,1,4)
-    plt.title('selc_context Spec')
-    librosa.display.specshow(data=self_context_spec.T, sr=20000, y_axis='mel')
-
-    plt.subplot(6,1,5)
+    plt.subplot(5,1,3)
     plt.title('Backchannel')
-    plt.plot(bc)
-    plt.xlim(0, len(bc))
+    plt.plot(back_channel)
+    plt.xlim(0, len(back_channel))
 
-
-    plt.subplot(6,1,6)
+    plt.subplot(5,1,4)
     plt.title('Backchannel Spec')
-    librosa.display.specshow(data=bc_spec.T, sr=20000, y_axis='mel')
+    librosa.display.specshow(data=back_channel_spec.T, sr=20000, y_axis='mel')
+
+    plt.subplot(5,1,5)
+    plt.title('Backchannel class')
+    plt.plot(back_channel_class)
+    plt.xlim(0, len(back_channel_class))
+
     if pause:
         plt.pause(0.1)
     else:
@@ -142,7 +130,7 @@ def visualize_datapoint(output, verbose=True, pause=True):
 
 def sound_datapoint(output, sr=20000):
     sd.default.samplerate = sr
-    s = output['speaker_audio'].numpy()
+    s = output['context_audio'].numpy()
     bc = output['back_channel_audio'].numpy()
     bc_word = output['back_channel_word']
     audio = np.vstack((s, bc)).T

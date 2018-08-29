@@ -24,7 +24,7 @@
 [notebook status](/notes/programming.ipynb)
 
 
-## Goal
+## Step 1
 
 The goal of this code is to extract backchannel data from the maptask dataset in order
 to train a model to generate backchannels conditioned on audio input. A speech-to-speech
@@ -36,5 +36,30 @@ model that hopefully captures some prosodic nuance and timings for backchannel g
 3. Define how large the `context` is, i.e how many seconds before the backchannel is part of
    the datapoint.
 4. Extract all backchannels with `context` as audio and text
-5. Save to disk
 
+
+## Step 2
+
+Define a dataset and dataloader to be used during training.
+
+* What is a datapoint?
+* Why do we construct the datapoint as such?
+
+Thoughts
+* Cleaning the audio?
+  - All parts where silence is indicated should be set to zero.
+  - Define a backchannel with a sufficient amount of silence preceding it. Make sure that
+	it is a response utternce as opposed to a continuation
+* Should the training be continuous on a frame to frame basis?
+  - There is no specific backchannel classification but all audio produced by network is
+	considered a backchannel. The argumentation being that the dataset has been structured
+	in such a way as to only contain backchannel response.
+  - Given any audio in produce audio out which has highest probability. Autoregression.
+* Should the training be continuous on a segment basis?
+  - this would make it such that a datpoint would be defined as some context, i.e time
+	with the speaker audio/information, and then the correct answer, i.e the backchannel
+	audio.
+  - For this approach all backchannels are found, the context extracted and used as input
+	and the backchannel as output.
+  - This would also require negative datapoints to distinguish between context where no
+	backchannel is provided and when they are provided.

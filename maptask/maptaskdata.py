@@ -11,28 +11,17 @@ import torch
 import torchaudio
 from torch.utils.data import Dataset, DataLoader
 from torchaudio.transforms import MEL2 as MelSpectrogram
-from torchaudio.transforms import SPECTROGRAM as Spec
+from torchaudio.transforms import F2M
 
 from maptask.utils import get_paths, load_audio, visualize_datapoint, sound_datapoint
 
+# TODO
+# Should do this when downloading dataset
 # Using scipy read -> Error: q6ec2.mix.wav
 # Removing q6ec2 it is corrupt
 
-# -------- UTILS -------------
 
-def vis_and_listen(dset, idx=None):
-    if not idx:
-        idx = random.randint(0, len(dset))
-    output = dset[idx]
-    print('Length and type: ')
-    print('Speaker: ', len(output['speaker_audio']), type(output['speaker_audio']))
-    print('Backchannel audio: ', len(output['back_channel_audio']), type(output['back_channel_spec']))
-    print('Word: ', output['back_channel_word'])
-    visualize_backchannel(output['speaker_audio'], output['back_channel_audio'], pause=True)
-    sound_backchannel(output['speaker_audio'], output['back_channel_audio'])
-
-
-# Dataset
+# Annotation
 class Maptask(object):
     '''
     This class iterates through the annotations provided by maptask and extracts
@@ -197,6 +186,7 @@ class Maptask(object):
         print('-'*50)
 
 
+# Dataset
 class MaptaskDataset(Dataset):
     ''' 128 dialogs, 16-bit samples, 20 kHz sample rate, 2 channels per conversation '''
     def __init__(self,
@@ -246,6 +236,22 @@ class MaptaskDataset(Dataset):
     def __len__(self):
         return len(self.maptask.back_channel_list)
 
+    def griffin_lim(self, magnitude, iters=30):
+        '''
+        based on:
+        https://github.com/soobinseo/Tacotron-pytorch/blob/master/data.py
+        in turn based on:
+        librosa implementation of Griffin-Lim
+        Based on https://github.com/librosa/librosa/issues/434
+        '''
+        angles = np.exp(2j * np.pi * np.random.rand(*magnitude.shape))
+        S_complex = np.abs(magnitude).astype(np.complex)
+        y = librosa.istft(S_complex * angles)
+        for i in range(iters):
+            _, angles = librosa.magphase(librosa.stft(y))
+            y = librosa.istft(S_complex * angles)
+        return y
+
     def __getitem__(self, idx):
         bc = self.maptask.back_channel_list[idx]
         start, end = bc['sample']
@@ -254,7 +260,7 @@ class MaptaskDataset(Dataset):
         context = torch.zeros(n_samples)
         back_channel = torch.zeros(n_samples)
 
-        # Find start of context => 0
+        # Find start of context >= 0
         context_start = end - n_samples
         if context_start < 0:
             context_start = 0
@@ -269,7 +275,9 @@ class MaptaskDataset(Dataset):
             tmp_context = y[context_start:end, 1]
             tmp_back_channel = y[context_start:end,0]
 
-        # Ones where the actual backchannel is, zero on "self context"
+        context[-tmp_context.shape[0]:] = tmp_context
+        back_channel[-back_channel.shape[0]:] = tmp_back_channel
+
         n_samples_bc = end - start
         back_channel_class = torch.zeros(back_channel.shape)
         back_channel_class[-n_samples_bc:] = 1
@@ -355,23 +363,19 @@ class MaptaskSpecDataloader(DataLoader):
                 reset = False
 
 
+
 if __name__ == "__main__":
-    import random
-    import librosa.display
-    import matplotlib.pyplot as plt
-    import sounddevice as sd
-    import numpy as np
-    import time
 
     print('Creating Dataset and loading audio')
-    dset = MaptaskDataset(pause=0.1, max_utterences=1)
+    dset = MaptaskDataset(pause=0.5, max_utterences=1)
     audio = dset.audio
 
     # for reusing audio in REPL
     dset = MaptaskDataset(pause=0.5, max_utterences=1, context=2, audio=audio)
 
+    # ---------------------------------------------------------------------
     print('Audio: DataLoader')
-    maploader = MaptaskAudioDataloader(dset, pred=3, seq_len=300, overlap_len=100, batch_size=128, num_workers=4)
+    maploader = MaptaskAudioDataloader(dset, pred=1, seq_len=300, overlap_len=100, batch_size=128, num_workers=4)
     for batch in maploader:
         print(type(batch))
         print(batch[0][0].shape)
@@ -382,6 +386,7 @@ if __name__ == "__main__":
         if ans == 'n':
             break
 
+    # ---------------------------------------------------------------------
     print('Spectrogram: DataLoader')
     maploader = MaptaskSpecDataloader(dset, pred=1, seq_len=10, overlap_len=2, batch_size=128, num_workers=4)
     for batch in maploader:
@@ -396,14 +401,10 @@ if __name__ == "__main__":
             break
 
     # ---------------------------------------------------------------------
-    # Some output contains only zeros. Probably the broken file (use
-    # scipy.io.wavfile.read, to spot)
-    # idx = 800  # 800, 888 is good and clear
-    # output = dset[idx]
 
     print('Listen to audio datapoints')
     while True:
-        idx = random.randint(0, len(dset))
+        idx = int(torch.randint(len(dset), (1,)).item())
         output = dset[idx]
         visualize_datapoint(output)
         sound_datapoint(output)

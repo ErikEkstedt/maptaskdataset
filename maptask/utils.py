@@ -1,43 +1,22 @@
-from os.path import join, exists
 from scipy.io.wavfile import read, write
 from subprocess import call
 from tqdm import tqdm
 import glob
 import librosa
+import librosa.display
 import matplotlib.pyplot as plt
 import numpy as np
 import sounddevice as sd
 import os
+from os.path import join, exists
 import pathlib
 import time
 import xml.etree.ElementTree as ET
 
 import torchaudio
+
 # ------------------------------------------
 # Actual helper functions
-
-def load_dialog(name, dialog_path=None):
-    if not dialog_path:
-        dialog_path = get_paths()['dialog_path']
-    for file in os.listdir(dialog_path):
-        if name in file:
-            if file.endswith('.wav'):
-                return read(join(dialog_path, file))
-
-
-def listen_to_data(name, session_data):
-    for d in session_data:
-        print(d['words'])
-        t0, t1 = d['time']
-        s0, s1 = d['sample']
-        print('time: {} - {}'.format(t0, t1))
-        print('sample: {} - {}'.format(s0, s1))
-        sr, y = load_dialog(name)
-        sd.play(y[s0:s1])
-        t0, t1 = d['time']
-        duration = t1 - t0
-        time.sleep(duration)
-
 
 def get_paths(root_path=None):
     # Assumes maptask dialogue files are downloaded in $dataPath
@@ -78,9 +57,6 @@ def load_audio(path, torch_load_audio=True, norm=True):
                 except:
                     print('Error', wav)
                     continue
-            if y.nelement()==0:
-                print('Empty Tensor')
-                print(name)
             if norm:
                 y /= y.max()
             audio[name] = y
@@ -100,25 +76,23 @@ def visualize_datapoint(output, verbose=True, pause=True):
     plt.figure('Backchannel'+'-'+back_channel_word)
 
     plt.subplot(5,1,1)
-    plt.title('Context')
+    plt.title('Context audio and spectrogram')
     plt.plot(context)
     plt.xlim(0, len(context))
 
     plt.subplot(5,1,2)
-    plt.title('Context Spec')
     librosa.display.specshow(data=context_spec.T, sr=20000, y_axis='mel')
 
     plt.subplot(5,1,3)
-    plt.title('Backchannel')
+    plt.subplots_adjust(hspace=0.5)
+    plt.title('Backchannel audio, spectrogram and binary class')
     plt.plot(back_channel)
     plt.xlim(0, len(back_channel))
 
     plt.subplot(5,1,4)
-    plt.title('Backchannel Spec')
     librosa.display.specshow(data=back_channel_spec.T, sr=20000, y_axis='mel')
 
     plt.subplot(5,1,5)
-    plt.title('Backchannel class')
     plt.plot(back_channel_class)
     plt.xlim(0, len(back_channel_class))
 
@@ -138,6 +112,12 @@ def sound_datapoint(output, sr=20000):
     sd.play(audio)
     time.sleep(librosa.get_duration(audio, sr=20000))
 
+
+def sound_torch_tensor(y, sr=20000):
+    sd.default.samplerate = sr
+    y = y.numpy()
+    sd.play(y)
+    time.sleep(librosa.get_duration(y, sr=20000))
 
 # ------------------------------------------
 # Early things
@@ -253,37 +233,6 @@ def extractGeMAPS(data_path, output_path, opensmile_path):
             else:
                 counter += 1
     print('Extracted GeMAP features from {} files.'.format(counter))
-
-
-def extract_tag_data(name, annotation_path):
-    '''
-    Extract timed-unit (tu), silence (si) and noise (noi) tags from the
-    .xml annotation file.
-
-    An xml-file represents a recorded dialog, e.g q1ec1.wav.
-    '''
-    # load timed-units.xml
-    timed_units_path = join(annotation_path, 'Data/timed-units')
-    tu_path = join(timed_units_path, name + '.timed-units.xml')
-    elements = ET.parse(tu_path)
-
-    tu, words, sil, noi = [], [], [], []
-    for elem in elements.iter():
-        try:
-            tmp = (float(elem.attrib['start']), float(elem.attrib['end']))
-        except:
-            continue
-        if elem.tag == 'tu':
-            # elem.attrib: start, end, utt
-            words.append(elem.text)  # word annotation
-            tu.append(tmp)
-        elif elem.tag == 'sil':
-            # elem.attrib: start, end
-            sil.append(tmp)
-        elif elem.tag == 'noi':
-            # elem.attrib: start, end, type='outbreath/lipsmack/...'
-            noi.append(tmp)
-    return {'tu': tu, 'silence': sil, 'noise': noi, 'words': words}
 
 
 # ------------------------------------------
@@ -403,189 +352,3 @@ def create_data_points(session_name, annotation_path, user='f'):
         if session_name in f and '.'+user+'.' in f:
             print(f)
             user_data = get_time_filename_utterence(f, annotation_path, pause_time=0.2)
-
-
-# ------------------------------------------
-
-
-def extract_tag_data_from_xml_path(xml_path):
-    '''
-    Extract timed-unit (tu), silence (si) and noise (noi) tags from the
-    .xml annotation file.
-    '''
-    # parse xml
-    xml_element_tree = ET.parse(xml_path)
-
-    tu, words, sil, noi = [], [], [], []
-    for elem in xml_element_tree.iter():
-        try:
-            tmp = (float(elem.attrib['start']), float(elem.attrib['end']))
-        except:
-            continue
-        if elem.tag == 'tu':
-            # elem.attrib: start, end, utt
-            words.append(elem.text)  # word annotation
-            tu.append(tmp)
-        elif elem.tag == 'sil':
-            # elem.attrib: start, end
-            sil.append(tmp)
-        elif elem.tag == 'noi':
-            # elem.attrib: start, end, type='outbreath/lipsmack/...'
-            noi.append(tmp)
-    return {'tu': tu, 'silence': sil, 'noise': noi, 'words': words}
-
-
-def get_timing_utterences(name,
-                          user='f',
-                          pause_time=1,
-                          pre_padding=0,
-                          post_padding=0,
-                          timed_units_path=None):
-
-    def merge_pauses(tu, words, threshold=0.1):
-        new_tu, new_words = [], []
-        start, last_end, tmp_words = 0, 0, []
-
-        for i, (t, w) in enumerate(zip(tu, words)):
-            # t[0] - start,  t[1] - end
-            pause_duration = t[0] - last_end
-            if pause_duration > threshold:
-                new_tu.append((start, last_end))
-                new_words.append(tmp_words)
-                tmp_words = [w]
-                start = t[0]
-                last_end = t[1]
-            else:
-                tmp_words.append(w)
-                last_end = t[1]
-        return new_tu[1:], new_words[1:]  # remove first entry which is always zero
-
-    if not timed_units_path:
-        timed_units_path = get_paths()['timed_units_path']
-
-    # load timed-units.xml. Searching through dir.
-    for file in os.listdir(timed_units_path):
-        if name in file:
-            if '.'+user+'.' in file:
-                xml_path = join(timed_units_path, file)
-
-    data = extract_tag_data_from_xml_path(xml_path)
-    times, words = merge_pauses(data['tu'], data['words'])
-
-    # Pad utterence to include context
-    if pre_padding or post_padding:
-        t = np.array(times)
-        t += (-pre_padding, post_padding)
-        times = t
-
-    samples = librosa.time_to_samples(times, sr=20000)
-
-    return [{'time':time, 'sample': sample, 'words': word} \
-            for time, sample, word in zip(times, samples, words)]
-
-
-def get_utterences(all_sessions_data, utterence_length=1):
-    utterence_data, vocab = [], {}
-    for session in all_sessions_data:
-        tmp_session_data = []
-        session_data = session['data']
-        for utterence in session_data:
-            utter = utterence['words']
-            if len(utter) <= utterence_length:
-                tmp_session_data.append(utterence)
-                if not utter[0] in vocab.keys():
-                    vocab[utter[0]] = 1
-                else:
-                    vocab[utter[0]] += 1
-        utterence_data.append({'name': session['name'],
-                                    'data': tmp_session_data})
-    return utterence_data, vocab
-
-
-# Go through dataset, find all relevant utterences
-
-def get_backchannels_from_vocab(backchannel_vocab):
-    for session in all_sessions_data:
-        tmp_session_data = []
-        session_data = session['data']
-        for utterence in session_data:
-            utter = utterence['words']
-            if len(utter) <= utterence_length:
-                tmp_session_data.append(utterence)
-                if not utter[0] in vocab.keys():
-                    vocab[utter[0]] = 1
-                else:
-                    vocab[utter[0]] += 1
-        back_channel_data.append({'name': session['name'],
-                                    'data': tmp_session_data})
-    return back_channel_data, vocab
-
-
-
-if __name__ == "__main__":
-
-    # PATHS
-    paths = get_paths()
-    print('dialog path: ', paths['dialog_path'])
-    print('annotation path: ', paths['annotation_path'])
-    print('mono path: ', paths['mono_path'])
-
-    session_names = [fname.split('.')[0] for fname in \
-                     os.listdir(paths['dialog_path']) if fname.endswith('.wav')]
-
-    user = 'f'
-    all_f_data = []
-    for name in tqdm(session_names):
-        session_data = get_timing_utterences(name,
-                                             user=user,
-                                             pause_time=0.2,
-                                             pre_padding=0,
-                                             post_padding=0,
-                                             timed_units_path=paths['timed_units_path'])
-        all_f_data.append({'name': name, 'data':session_data})
-
-    user = 'g'
-    all_g_data = []
-    for name in tqdm(session_names):
-        session_data = get_timing_utterences(name,
-                                             user=user,
-                                             pause_time=0.2,
-                                             pre_padding=0,
-                                             post_padding=0,
-                                             timed_units_path=paths['timed_units_path'])
-        all_g_data.append({'name': name, 'data':session_data})
-
-
-    f_small_utterences, f_vocab = get_utterences(all_f_data, utterence_length=1)
-    g_small_utterences, g_vocab = get_utterences(all_g_data, utterence_length=1)
-
-    f_vocab = sorted(f_vocab.items(), key=lambda t: t[1], reverse=True)
-    g_vocab = sorted(g_vocab.items(), key=lambda t: t[1], reverse=True)
-
-    print('Follower Vocab:')
-    for entry in f_vocab[:10]:
-        print(entry)
-
-    print('Guide Vocab:')
-    for entry in g_vocab[:10]:
-        print(entry)
-
-    f_dpoints, f_back = 0, []
-    for i in range(5):
-        f_back.append(f_vocab[i][0])
-        f_dpoints += f_vocab[i][1]
-
-    g_dpoints, g_back = 0, []
-    for i in range(5):
-        g_back.append(g_vocab[i][0])
-        g_dpoints += g_vocab[i][1]
-
-    print('Guide:')
-    print('Datapoints: ', g_dpoints)
-    print('Vocab: ', g_back)
-
-    print('Follower:')
-    print('Datapoints: ', f_dpoints)
-    print('Vocab: ', f_back)
-
-

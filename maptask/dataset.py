@@ -282,7 +282,7 @@ class MaptaskDataset(Dataset):
             tmp_back_channel = y[context_start:end,0]
 
         context[-tmp_context.shape[0]:] = tmp_context
-        back_channel[-back_channel.shape[0]:] = tmp_back_channel
+        back_channel[-tmp_back_channel.shape[0]:] = tmp_back_channel
 
         n_samples_bc = end - start
         back_channel_class = torch.zeros(back_channel.shape)

@@ -49,8 +49,9 @@ class Maptask(object):
     the utterence and 'words' is a list of strings.
     '''
 
-    def __init__(self, pause=0.2, max_utterences=1, root=None):
+    def __init__(self, pause=0.5, max_utterences=1, root=None, n_files=None):
         self.paths = get_paths(root)
+        self.n_files = n_files
         self.session_names = self._session_names()
 
         self.pause = pause
@@ -62,11 +63,14 @@ class Maptask(object):
         self.g_utter, self.g_vocab = self.get_utterences(g_data)
 
         self.back_channel_list = self.get_back_channel_list()
-        # self.add_audio_signal_to_back_channel_data()
 
     def _session_names(self):
-        return [fname.split('.')[0] for fname in \
-                os.listdir(self.paths['dialog_path']) if fname.endswith('.wav')]
+        session_names = [fname.split('.')[0] for fname in \
+                         os.listdir(self.paths['dialog_path']) if fname.endswith('.wav')]
+        if self.n_files:
+            print('n_files', self.n_files)
+            session_names = session_names[:self.n_files]
+        return session_names
 
     def extract_tag_data_from_xml_path(self, xml_path=None):
         '''
@@ -117,7 +121,6 @@ class Maptask(object):
         return new_tu[1:], new_words[1:]  # remove first entry which is always zero
 
     def get_timing_utterences(self, name, user='f'):
-
         # load timed-units.xml. Searching through dir.
         for file in os.listdir(self.paths['timed_units_path']):
             if name in file:
@@ -203,9 +206,11 @@ class MaptaskDataset(Dataset):
                  torch_load_audio=True,
                  audio=None,
                  normalize_audio=True,
-                 root=None):
-        self.maptask = Maptask(pause, max_utterences, root)
+                 root=None,
+                 n_files=None):
+        self.maptask = Maptask(pause, max_utterences, root, n_files)
         self.paths = self.maptask.paths
+        self.session_names = self.maptask.session_names
 
         # Mel
         self.use_spectrogram = use_spectrogram
@@ -230,6 +235,7 @@ class MaptaskDataset(Dataset):
             self.audio = audio
         else:
             self.audio = load_audio(self.paths['dialog_path'],
+                                    self.session_names,
                                     self.torch_load_audio,
                                     self.normalize_audio)
 
@@ -326,11 +332,22 @@ class MaptaskAudioDataloader(DataLoader):
                 start = seq_begin - self.overlap_len
                 end = seq_begin + self.seq_len
 
+                bc_class = batch['back_channel_class'][:, start:end]
                 bc_seq = batch['back_channel_audio'][:, start:end]
                 context_seq = batch['context_audio'][:, start:end]
-                input_seq = (context_seq[:,:-self.pred], bc_seq[:,:-self.pred])
-                target_seq = bc_seq[:, self.overlap_len:].contiguous()
-                yield (input_seq, reset, target_seq)
+
+                context = context_seq[:,:-self.pred]
+                self_context = bc_seq[:,:-self.pred]
+                self_context_class = bc_class[:,:-self.pred]
+                target = bc_seq[:, self.overlap_len:].contiguous()
+                target_class = bc_class[:, self.overlap_len:]
+
+                yield {'context': context,
+                       'self_context': self_context,
+                       'self_context_class': self_context_class,
+                       'target': target,
+                       'target_class': target_class,
+                       'reset': reset}
                 reset = False
 
 
@@ -381,7 +398,8 @@ def get_dataset_dataloader(pause=0.5,
                            batch_size=64,
                            pred=1,
                            seq_len=10,
-                           overlap_len=2):
+                           overlap_len=2,
+                           n_files=None):
 
     dset = MaptaskDataset(pause,
                           context,
@@ -396,9 +414,14 @@ def get_dataset_dataloader(pause=0.5,
                           torch_load_audio,
                           audio,
                           normalize_audio,
-                          root)
+                          root,
+                          n_files)
 
-    dloader = MaptaskSpecDataloader(dset, batch_size, pred, seq_len, overlap_len)
+    if use_spectrogram:
+        dloader = MaptaskSpecDataloader(dset, batch_size, pred, seq_len, overlap_len)
+    else:
+        dloader = MaptaskAudioDataloader(dset, batch_size, pred, seq_len,
+                                         overlap_len, drop_last=True)
     return dset, dloader
 
 if __name__ == "__main__":

@@ -37,29 +37,33 @@ def get_paths(root_path=None):
             'opensmile_path' : join(os.path.expanduser('~'), 'opensmile-2.3.0')}
 
 
-def load_audio(path, torch_load_audio=True, norm=True):
+def load_audio(path, session_names, torch_load_audio=True, norm=True):
     '''Iterate through the dialog directory and extract all .wav files and store in dict'''
     audio = {}
     for wav in tqdm(os.listdir(path)):
+        name = wav.split('.')[0]  #  q1ec1.mix.wav -> q1ec1
+        if name not in session_names:
+            continue
+
         if '.wav' in wav:
             fpath = join(path, wav)
-            name = wav.split('.')[0]  #  q1ec1.mix.wav -> q1ec1
-            y = None
-            if torch_load_audio:
-                try:
-                    y, sr = torchaudio.load(fpath)
-                except:
-                    print('Error', wav)
-                    continue
-            else:
-                try:
-                    sr, y = read(fpath)
-                except:
-                    print('Error', wav)
-                    continue
-            if norm:
-                y /= y.max()
-            audio[name] = y
+        y = None
+        if torch_load_audio:
+            try:
+                y, sr = torchaudio.load(fpath)
+            except:
+                print('Error', wav)
+                continue
+        else:
+            try:
+                sr, y = read(fpath)
+            except:
+                print('Error', wav)
+                continue
+        if norm:
+            y /= y.max()
+
+        audio[name] = y
     return audio
 
 

@@ -1,8 +1,10 @@
 import os
-from os.path import join
+from os.path import join, split
+import pathlib
 from tqdm import tqdm
 from scipy.io.wavfile import read, write
 import xml.etree.ElementTree as ET
+import librosa
 from librosa import time_to_samples as librosa_time_to_samples
 from librosa import samples_to_frames as librosa_samples_to_frames
 import numpy as np
@@ -312,7 +314,6 @@ class MaptaskDataset(Dataset):
 
 
 # DataLoaders
-
 class MaptaskAudioDataloader(DataLoader):
     def __init__(self, dset, batch_size, pred, seq_len, overlap_len, *args, **kwargs):
         super().__init__(dset, batch_size, *args, **kwargs)
@@ -424,49 +425,196 @@ def get_dataset_dataloader(pause=0.5,
                                          overlap_len, drop_last=True)
     return dset, dloader
 
+
+# Numpy
+class MaptaskDataset2(Dataset):
+    def __init__(self,
+                 sample_rate=20000,
+                 use_spectrogram=False,
+                 window_size=512,
+                 hop_length=256,
+                 n_fft=None,
+                 pad=0,
+                 n_mels=40,
+                 root='data/chopped',
+                 n_files=None):
+        self.root = root
+        self.files = os.listdir(root)
+
+        # Mel
+        self.use_spectrogram = use_spectrogram
+        self.sample_rate = sample_rate
+        self.window_size = window_size
+        self.hop_length = hop_length
+        self.n_fft = n_fft
+        self.pad = pad
+        self.n_mels = n_mels
+
+        self.mel_spec = MelSpectrogram(sr=self.sample_rate,
+                                       ws=self.window_size,
+                                       hop=self.hop_length,
+                                       n_fft=self.n_fft,
+                                       pad=self.pad,
+                                       n_mels=self.n_mels)
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        fpath = join(self.root, self.files[idx])
+        data = np.load(fpath)
+        context, backchannel, bc_class = data
+        context /= data.max()
+        backchannel /= data.max()
+        return {'context': torch.tensor(context).float(),
+                'backchannel': torch.tensor(backchannel).float(),
+                'bc_class': torch.tensor(bc_class).float()}
+
+
+class MaptaskDataloader(DataLoader):
+    def __init__(self, dset, batch_size, seq_len, hop_len, prediction,  *args, **kwargs):
+        super().__init__(dset, batch_size, *args, **kwargs)
+        self.seq_len = seq_len
+        self.hop_len = hop_len
+        self.prediction = prediction
+
+    def __iter__(self):
+        for batch in super().__iter__():
+            (batch_size, n_samples) = batch['context'].shape
+
+            reset = True
+            for start in range(n_samples-self.seq_len-self.prediction):
+                end = start + self.seq_len
+                target_start = start + self.prediction
+                target_end = end + self.prediction
+
+                context = batch['context'][:, start:end]
+                bc = batch['backchannel'][:, start:end]
+                bc_class = batch['bc_class'][:, start:end]
+
+                target = batch['backchannel'][:, target_start:target_end]
+                target_class = batch['bc_class'][:, target_start:target_end]
+
+                yield {'context': context, 'backchannel': bc, 'bc_class':
+                       bc_class, 'target': target, 'target_class': target_class}
+                reset = False
+
+
+def save_bc(y, bc, filename, context=2, sr=20000):
+    start, end = bc['sample']
+
+    n_samples = librosa_time_to_samples(context, sr=sr)
+    context = np.zeros(n_samples)
+    back_channel = np.zeros(n_samples)
+
+    # Find start of context >= 0
+    context_start = end - n_samples
+    if context_start < 0:
+        context_start = 0
+
+    if bc['user'] == 'f':
+        # back channel generator is 'f'
+        tmp_context = y[context_start:end, 0]
+        tmp_back_channel = y[context_start:end, 1]
+    else:
+        # back channel generator is 'g'
+        tmp_context = y[context_start:end, 1]
+        tmp_back_channel = y[context_start:end,0]
+
+    context[-tmp_context.shape[0]:] = tmp_context
+    back_channel[-tmp_back_channel.shape[0]:] = tmp_back_channel
+
+    n_samples_bc = end - start
+    back_channel_class = np.zeros(back_channel.shape)
+    back_channel_class[-n_samples_bc:] = 1
+
+    data = np.array((context, back_channel, back_channel_class))
+    np.save(filename, data)
+
+
+def chunk_audio(bc_list, loadpath, savepath, context=2, sr=20000):
+    pathlib.Path(savepath).mkdir(parents=True, exist_ok=True)
+    name = ''
+    n = 0
+    for bc in tqdm(bc_list):
+        if name != bc['name']:
+            name = bc['name']
+            fpath = join(loadpath, name + '.mix.wav')
+            y, sr = torchaudio.load(fpath)
+            y = y.numpy()
+            filename = join(savepath, name + '_' + str(n))
+            save_bc(y, bc, filename, context, sr)
+        else:
+            filename = join(savepath, name + '_' + str(n))
+            save_bc(y, bc, filename, context, sr)
+        n += 1
+
+
 if __name__ == "__main__":
-    print('Creating Dataset and loading audio')
-    dset = MaptaskDataset(pause=0.5, max_utterences=1)
-    audio = dset.audio
+    print('maptask annotaions')
+    paths = get_paths()
 
-    # for reusing audio in REPL
-    dset = MaptaskDataset(pause=0.5, max_utterences=1, context=2, audio=audio)
+    dset = MaptaskDataset2()
+    dloader = MaptaskDataloader(dset, batch_size=32, seq_len=10, hop_len=5,
+                                prediction=1)
 
-    # ---------------------------------------------------------------------
-    print('Audio: DataLoader')
-    maploader = MaptaskAudioDataloader(dset, pred=1, seq_len=300, overlap_len=100, batch_size=128, num_workers=4)
-    for batch in maploader:
-        print(type(batch))
-        print(batch[0][0].shape)
-        print(batch[0][1].shape)
-        print(batch[1])
-        print(batch[2].shape)
-        ans = input('Press n for quit')
-        if ans == 'n':
-            break
+    for batch in dloader:
+        print(batch['context'].shape)
+        print(batch['backchannel'].shape)
+        print(batch['bc_class'].shape)
+        print(batch['target'].shape)
+        print(batch['target_class'].shape)
+        input()
 
-    # ---------------------------------------------------------------------
-    print('Spectrogram: DataLoader')
-    maploader = MaptaskSpecDataloader(dset, pred=1, seq_len=10, overlap_len=2, batch_size=128, num_workers=4)
-    for batch in maploader:
-        print(type(batch))
-        print(batch[0][0].shape)
-        print(batch[0][1].shape)
-        print(batch[1])
-        print(batch[2].shape)
-        print(batch[3].shape)
-        ans = input('Press n for quit')
-        if ans == 'n':
-            break
+    import sounddevice as sd
+    sd.default.samplerate=20000
 
-    # ---------------------------------------------------------------------
+    sd.play(np.stack((context, backchannel), axis=1))
+    sd.play(bc_class)
 
-    print('Listen to audio datapoints')
-    while True:
-        idx = int(torch.randint(len(dset), (1,)).item())
-        output = dset[idx]
-        visualize_datapoint(output)
-        sound_datapoint(output)
-        ans = input('Press n for quit')
-        if ans == 'n':
-            break
+    # print('PyTorch datasets & loader')
+    # print('Creating Dataset and loading audio')
+    # dset = MaptaskDataset(pause=0.5, max_utterences=1)
+    # audio = dset.audio
+
+    # # for reusing audio in REPL
+    # dset = MaptaskDataset(pause=0.5, max_utterences=1, context=2, audio=audio)
+
+    # # ---------------------------------------------------------------------
+    # print('Audio: DataLoader')
+    # maploader = MaptaskAudioDataloader(dset, pred=1, seq_len=300, overlap_len=100, batch_size=128, num_workers=4)
+    # for batch in maploader:
+    #     print(type(batch))
+    #     print(batch[0][0].shape)
+    #     print(batch[0][1].shape)
+    #     print(batch[1])
+    #     print(batch[2].shape)
+    #     ans = input('Press n for quit')
+    #     if ans == 'n':
+    #         break
+
+    # # ---------------------------------------------------------------------
+    # print('Spectrogram: DataLoader')
+    # maploader = MaptaskSpecDataloader(dset, pred=1, seq_len=10, overlap_len=2, batch_size=128, num_workers=4)
+    # for batch in maploader:
+    #     print(type(batch))
+    #     print(batch[0][0].shape)
+    #     print(batch[0][1].shape)
+    #     print(batch[1])
+    #     print(batch[2].shape)
+    #     print(batch[3].shape)
+    #     ans = input('Press n for quit')
+    #     if ans == 'n':
+    #         break
+
+    # # ---------------------------------------------------------------------
+
+    # print('Listen to audio datapoints')
+    # while True:
+    #     idx = int(torch.randint(len(dset), (1,)).item())
+    #     output = dset[idx]
+    #     visualize_datapoint(output)
+    #     sound_datapoint(output)
+    #     ans = input('Press n for quit')
+    #     if ans == 'n':
+    #         break

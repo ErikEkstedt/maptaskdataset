@@ -24,7 +24,7 @@ def get_paths(root_path=None):
         try:
             full_path = os.path.realpath(__file__)
             root_path, filename = os.path.split(full_path)
-        except: # for ipython repl error
+        except: # for ipython repl error (__file__ does not exist)
             print('Assumes this repo is in home directory')
             root_path = join(os.path.expanduser('~'), 'maptaskdataset/maptask')
     data_path = os.path.realpath(join(root_path, 'data'))

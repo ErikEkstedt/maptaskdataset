@@ -1,9 +1,15 @@
-audioread
 librosa
 matplotlib
 numpy
 scipy
 tqdm
+
+torch
+torchvision
+
+pysptk
+pyworld
+sounddevice
 
 ipython
 jupyter

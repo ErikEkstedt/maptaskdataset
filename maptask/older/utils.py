@@ -28,10 +28,9 @@ def get_paths(root_path=None):
             print('Assumes this repo is in home directory')
             root_path = join(os.path.expanduser('~'), 'maptaskdataset/maptask')
     data_path = os.path.realpath(join(root_path, 'data'))
-    return {'data_path' : data_path,
-            'annotation_path' : join(data_path, 'maptaskv2-1'),
-            'dialog_path' : join(data_path, 'dialogues'),
-            'mono_path' : join(data_path, 'dialogues_mono'),
+    return {'root' : data_path,
+            'annotations' : join(data_path, 'maptaskv2-1'),
+            'dialogues' : join(data_path, 'dialogues'),
             'timed_units_path': join(data_path, "maptaskv2-1/Data/timed-units"),
             'gemap_path' : join(data_path, 'gemaps'),
             'opensmile_path' : join(os.path.expanduser('~'), 'opensmile-2.3.0')}

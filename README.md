@@ -2,22 +2,37 @@
 
 ## Install
 
-1. `conda create -n maptask python=3.6`
+`git clone https://github.com/ErikEkstedt/maptaskdataset.git`
+
+1. `conda create -n maptask python=3.7`
+    - [miniconda](https://conda.io/miniconda.html)
 2. `source activate maptask`
 3. `pip install -r requirements.txt`
 4. `cd` into root of repo and `pip install -e .`
+5. Install [torchaudio](https://github.com/pytorch/audio)
+    - git clone [torchaudio](https://github.com/pytorch/audio)
+    - Summary of installation
+      - Dependencies:
+        - Linux(Ubuntu): `sudo apt-get install sox libsox-dev libsox-fmt-all`
+        - OSX: `brew install sox`
+      - `cd` into root of repo and:
+        - Linux: `python setup.py install`
+        - OSX: `MACOSX_DEPLOYMENT_TARGET=10.9 CC=clang CXX=clang++ python setup.py install`
+
 
 ---------------------
 
-* [download-audio.sh](./download-audio.sh)
-  - downloads data (wavs and annotation) into the [data](./data/) directory
-* [chop-audiofiles.sh](./chop-audiofiles.sh) 
-  - Chops audio files in $1 into $3 second clips and stores in directory $2 ($x=input args when running script)
-* [utils.py](./utils.py)
-  - Contain the code for the various processing.
-* [process\_audio.py](./process_audio.py)
-  - Code for actually utilizing the code in `utils.py`
-* [maptaskdata.py](./maptaskdata.py)
+## Preprocess
+
+1. [download-audio.sh](download-audio.sh)
+    - Downloads data (wavs and annotation) into the [data](data/) directory
+2. [preprocess.py](preprocess.py)
+    - Read annotations for maptask and extract what is defined as backchannel utterences.
+    - Chop out the relevant parts of the audio and save as .npy files
+3. [dataset.py](dataset.py)
+    - `TransformDataset(Dataset)`
+    - `class TranformDataloader(DataLoader)`
+    - `plot_sample_example(dset, datatype='context', idx=None)`
 
 
 ## Notebook

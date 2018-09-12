@@ -1,620 +1,420 @@
 import os
-from os.path import join, split
-import pathlib
-from tqdm import tqdm
-from scipy.io.wavfile import read, write
-import xml.etree.ElementTree as ET
-import librosa
-from librosa import time_to_samples as librosa_time_to_samples
-from librosa import samples_to_frames as librosa_samples_to_frames
+from glob import glob
 import numpy as np
+from scipy.io import wavfile
+import matplotlib.pyplot as plt
 
-import torch
-import torchaudio
+import pysptk
+import pyworld
+import librosa
+from librosa.display import specshow, waveplot
 from torch.utils.data import Dataset, DataLoader
-from torchaudio.transforms import MEL2 as MelSpectrogram
-from torchaudio.transforms import F2M
-
-from maptask.utils import get_paths, load_audio, visualize_datapoint, sound_datapoint
-
-# TODO
-# Should do this when downloading dataset
-# Using scipy read -> Error: q6ec2.mix.wav
-# Removing q6ec2 it is corrupt
 
 
-# Annotation
-class Maptask(object):
-    '''
-    This class iterates through the annotations provided by maptask and extracts
-    backchannel uttterences.
+# Transform
+class SpeechFeatures(object):
+    def __init__(self,
+                 sr=20000,
+                 fft_length=1024,
+                 hop_length=256,
+                 frame_period=12.8,
+                 alpha=0.441,
+                 order=127,
+                 f0_floor=71.,
+                 f0_ceil=800.,
+                 n_mfcc=20,
+                 norm_mfcc=True,
+                 use_mel=False,
+                 bc_threshold=0.33):
+        self.sr = sr
+        self.fft_length = fft_length
+        self.hop_length = hop_length
+        self.frame_period = frame_period
+        self.alpha = alpha
+        self.order = order
+        self.f0_floor = f0_floor
+        self.f0_ceil = f0_ceil
+        self.n_mfcc = n_mfcc
+        self.norm_mfcc = norm_mfcc
+        self.use_mel = use_mel
+        self.bc_threshold = bc_threshold
 
-    The annotations in the dataset contains words spoken and correlating timings.
-    Utterences from one speaker seperated by less than `pause` are combined to
-    make a longer utterence, a sentence.
 
-    All utterences which only contains one word are extracted and sorted by
-    popularity. From this list of one word utterences the most common ones which
-    are known to be back channels are then extracted.
-
-    As of now this means that the 6 words below make up all utterences in the
-    dataset:
-
-    self.back_channels = ['right', 'okay', 'mmhmm', 'uh-huh', 'yeah', 'mm']
-
-    This class stores all extracted backchannels in a list where each entry in
-    the list is a dict:
-
-        {'name': name, 'time', time, 'sample': sample, 'words': words}
-
-    Here 'name' is the name of the session, 'time' and 'sample' are the timings of
-    the utterence and 'words' is a list of strings.
-    '''
-
-    def __init__(self, pause=0.5, max_utterences=1, root=None, n_files=None):
-        self.paths = get_paths(root)
-        self.n_files = n_files
-        self.session_names = self._session_names()
-
-        self.pause = pause
-        self.max_utterences = max_utterences
-        self.back_channels = ['right', 'okay', 'mmhmm', 'uh-huh', 'yeah', 'mm']
-
-        f_data, g_data = self.extract_all_short_utterence_from_both_users()
-        self.f_utter, self.f_vocab = self.get_utterences(f_data)
-        self.g_utter, self.g_vocab = self.get_utterences(g_data)
-
-        self.back_channel_list = self.get_back_channel_list()
-
-    def _session_names(self):
-        session_names = [fname.split('.')[0] for fname in \
-                         os.listdir(self.paths['dialog_path']) if fname.endswith('.wav')]
-        if self.n_files:
-            print('n_files', self.n_files)
-            session_names = session_names[:self.n_files]
-        return session_names
-
-    def extract_tag_data_from_xml_path(self, xml_path=None):
+    def standardize_mfcc(self, mfcc):
+        ''' Standardize the mfcc values over time
+        mfcc (T, D)
         '''
-        Extract timed-unit (tu), silence (si) and noise (noi) tags from the
-        .xml annotation file.
-        '''
+        mean = mfcc.mean(0) # (D,)
+        std = mfcc.std(0)   # (D,)
+        standard = (mfcc - mean) / std
+        return standard
 
-        if not xml_path:
-            raise OSError("xml path required")
+    def samples_to_frames(self, x):
+        pad = len(x) % self.hop_length
+        if pad:
+            x = np.hstack((np.zeros(pad), x, np.zeros(self.hop_length)))
+        frames = librosa.util.frame(x, frame_length=self.hop_length,
+                                    hop_length=self.hop_length)
+        return frames.T
 
-        # parse xml
-        xml_element_tree = ET.parse(xml_path)
-
-        tu, words, sil, noi = [], [], [], []
-        for elem in xml_element_tree.iter():
-            try:
-                tmp = (float(elem.attrib['start']), float(elem.attrib['end']))
-            except:
-                continue
-            if elem.tag == 'tu':
-                # elem.attrib: start, end, utt
-                words.append(elem.text)  # word annotation
-                tu.append(tmp)
-            elif elem.tag == 'sil':
-                # elem.attrib: start, end
-                sil.append(tmp)
-            elif elem.tag == 'noi':
-                # elem.attrib: start, end, type='outbreath/lipsmack/...'
-                noi.append(tmp)
-
-        return {'tu': tu, 'silence': sil, 'noise': noi, 'words': words}
-
-    def merge_pauses(self, tu, words):
-        new_tu, new_words = [], []
-        start, last_end, tmp_words = 0, 0, []
-        for i, (t, w) in enumerate(zip(tu, words)):
-            # t[0] - start,  t[1] - end
-            pause_duration = t[0] - last_end
-            if pause_duration > self.pause:
-                new_tu.append((start, last_end))
-                new_words.append(tmp_words)
-                tmp_words = [w]
-                start = t[0]
-                last_end = t[1]
+    def backchannel_activation_to_frames(self, bc):
+        bc = self.samples_to_frames(bc)
+        frames = bc.shape[0]
+        bc_new = []
+        for b in bc:
+            if b.sum() > int(frames*self.bc_threshold):
+                bc_new.append(1.)
             else:
-                tmp_words.append(w)
-                last_end = t[1]
-        return new_tu[1:], new_words[1:]  # remove first entry which is always zero
+                bc_new.append(0.)
+        return np.array(bc_new)
 
-    def get_timing_utterences(self, name, user='f'):
-        # load timed-units.xml. Searching through dir.
-        for file in os.listdir(self.paths['timed_units_path']):
-            if name in file:
-                if '.'+user+'.' in file:
-                    xml_path = join(self.paths['timed_units_path'], file)
+    def process_audio(self, x):
+        pitch = pysptk.swipe(x, fs=self.sr, hopsize=self.hop_length, min=self.f0_floor, max=self.f0_ceil, otype="pitch")
+        f0, timeaxis = pyworld.dio(x, fs=self.sr, f0_floor=self.f0_floor, f0_ceil=self.f0_ceil, frame_period=self.frame_period)
+        f0 = pyworld.stonemask(x, f0, timeaxis, self.sr)
 
-        data = self.extract_tag_data_from_xml_path(xml_path)
+        # x_frame = self.samples_to_frames(x)
 
-        times, words = self.merge_pauses(data['tu'], data['words'])
+        if self.use_mel:
+            mel = librosa.feature.melspectrogram(x, sr=self.sr, n_fft=self.fft_length, hop_length=self.hop_length)
+            mfcc = librosa.feature.mfcc(S=mel, sr=self.sr, n_mfcc=self.n_mfcc)
+            if self.norm_mfcc:
+                mfcc = self.standardize_mfcc(mfcc)
+            return {'mel': mel.T, 'mfcc': mfcc.T, 'f0': f0, 'pitch': pitch}
+        else:
+            ap = pyworld.d4c(x, f0, timeaxis, self.sr, fft_size=self.fft_length)  # Aperiodicity
+            sp = pyworld.cheaptrick(x, f0, timeaxis, self.sr,
+                                    fft_size=self.fft_length)
+            return {'sp': sp, 'ap': ap, 'f0': f0, 'pitch': pitch}
 
-        samples = librosa_time_to_samples(times, sr=20000)
-
-        return [{'name': name, 'user': user, 'time':time, 'sample': sample, 'words': word} \
-                for time, sample, word in zip(times, samples, words)]
-
-    def extract_all_short_utterence_from_both_users(self):
-        f_data, g_data = [], []
-        for name in tqdm(self.session_names):
-            f_data.append(self.get_timing_utterences(name, user='f'))
-            g_data.append(self.get_timing_utterences(name, user='g'))
-        return f_data, g_data
-
-    def get_utterences(self, data):
-        utterence_data, vocab = [], {}
-        for session in data:
-            tmp_session_data = []
-            for utterence in session:
-                utter = utterence['words']
-                if len(utter) <= self.max_utterences:
-                    tmp_session_data.append(utterence)
-                    if not utter[0] in vocab.keys():
-                        vocab[utter[0]] = 1
-                    else:
-                        vocab[utter[0]] += 1
-            utterence_data.append(tmp_session_data)
-
-        vocab = sorted(vocab.items(), key=lambda t: t[1], reverse=True)
-        return utterence_data, vocab
-
-    def get_back_channel_list(self):
-        back_channel_list = []
-        for file_utters in self.f_utter + self.g_utter:
-            for utter in file_utters:
-                word = utter['words'][0]
-                if word in self.back_channels:
-                    back_channel_list.append(utter)
-        return back_channel_list
-
-    def print_vocab(self, top=5):
-        f_dpoints, f_back = 0, []
-        g_dpoints, g_back = 0, []
-        for i in range(top):
-            f_back.append(self.f_vocab[i][0])
-            f_dpoints += self.f_vocab[i][1]
-            g_back.append(self.g_vocab[i][0])
-            g_dpoints += self.g_vocab[i][1]
-        print('Guide:')
-        print('Datapoints: ', g_dpoints)
-        print('Vocab: ', g_back)
-        print()
-        print('Follower:')
-        print('Datapoints: ', f_dpoints)
-        print('Vocab: ', f_back)
-        print()
-        print('Total: ', g_dpoints + f_dpoints)
-        print('-'*50)
+    def __call__(self, sample):
+        context, backchannel, bc_class = sample
+        context = self.process_audio(context)
+        backchannel = self.process_audio(backchannel)
+        bc_class = self.backchannel_activation_to_frames(bc_class)
+        return context, backchannel, bc_class
 
 
 # Dataset
-class MaptaskDataset(Dataset):
-    ''' 128 dialogs, 16-bit samples, 20 kHz sample rate, 2 channels per conversation '''
+class TransformDataset(Dataset):
     def __init__(self,
-                 pause=0.5,
+                 root_dir,
+                 sr=20000,
                  context=2,
-                 max_utterences=1,
-                 sample_rate=20000,
-                 use_spectrogram=True,
-                 window_size=512,
+                 fft_length=1024,
                  hop_length=256,
-                 n_fft=None,
-                 pad=0,
-                 n_mels=40,
-                 torch_load_audio=True,
-                 audio=None,
-                 normalize_audio=True,
-                 root=None,
-                 n_files=None):
-        self.maptask = Maptask(pause, max_utterences, root, n_files)
-        self.paths = self.maptask.paths
-        self.session_names = self.maptask.session_names
+                 frame_period=12.8,
+                 alpha=0.441,
+                 order=40,
+                 f0_floor=71.,
+                 f0_ceil=800.,
+                 n_mfcc=20,
+                 norm_mfcc=True,
+                 use_mel=False,
+                 n_mels=128,
+                 bc_threshold=0.33):
+        """
+        Args:
+        root_dir (string): Directory with all the wav.
+        transform (callable, optional): Optional transform to be applied
+        on a sample.
+        """
+        self.root_dir = root_dir
+        self.data = [f for f in glob(os.path.join(root_dir, '*.npy'))]
 
-        # Mel
-        self.use_spectrogram = use_spectrogram
-        self.sample_rate = sample_rate
-        self.window_size = window_size
+        # Transform
+        self.sr = sr
+        self.fft_length = fft_length
         self.hop_length = hop_length
-        self.n_fft = n_fft
-        self.pad = pad
+        self.ap_size = fft_length // 2 + 1  # 1024 -> 513
+        self.n_mfcc = n_mfcc
+        self.norm_mfcc = norm_mfcc
+        self.use_mel = use_mel
         self.n_mels = n_mels
-
-        self.mel_spec = MelSpectrogram(sr=self.sample_rate,
-                                       ws=self.window_size,
-                                       hop=self.hop_length,
-                                       n_fft=self.n_fft,
-                                       pad=self.pad,
-                                       n_mels=self.n_mels)
-        # Audio
-        self.normalize_audio = normalize_audio
-        self.context = context
-        self.torch_load_audio = torch_load_audio
-        if audio:
-            self.audio = audio
-        else:
-            self.audio = load_audio(self.paths['dialog_path'],
-                                    self.session_names,
-                                    self.torch_load_audio,
-                                    self.normalize_audio)
+        self.frame_period = frame_period
+        self.alpha = alpha
+        self.order = order
+        self.f0_floor = f0_floor
+        self.f0_ceil = f0_ceil
+        self.bc_threshold = bc_threshold
+        self.transform = SpeechFeatures(sr,
+                                        fft_length,
+                                        hop_length,
+                                        frame_period,
+                                        alpha,
+                                        order,
+                                        f0_floor,
+                                        f0_ceil,
+                                        n_mfcc,
+                                        norm_mfcc,
+                                        use_mel,
+                                        bc_threshold)
+        # Dimensions
+        self.n_frames = sr*context // hop_length + 1  # 157
+        # out_size = n_mels + n_mfcc + n_ap_channels + f0 + pitch + bc_class
+        # => 128 + 20 + 513 + 1 + 1 + 1 = 664
+        self.frame_out_size = self.n_mels + self.n_mfcc + self.ap_size + 1 + 1 + 1
+        # times 2 channels (speaker, backchanneler)
+        # => 663 * 2 = 1326
+        self.utterence_size = 2*self.frame_out_size*self.n_frames
 
     def __len__(self):
-        return len(self.maptask.back_channel_list)
-
-    def griffin_lim(self, magnitude, iters=30):
-        '''
-        based on:
-        https://github.com/soobinseo/Tacotron-pytorch/blob/master/data.py
-        in turn based on:
-        librosa implementation of Griffin-Lim
-        Based on https://github.com/librosa/librosa/issues/434
-        '''
-        angles = np.exp(2j * np.pi * np.random.rand(*magnitude.shape))
-        S_complex = np.abs(magnitude).astype(np.complex)
-        y = librosa.istft(S_complex * angles)
-        for i in range(iters):
-            _, angles = librosa.magphase(librosa.stft(y))
-            y = librosa.istft(S_complex * angles)
-        return y
+        return len(self.data)
 
     def __getitem__(self, idx):
-        bc = self.maptask.back_channel_list[idx]
-        start, end = bc['sample']
+        fpath = os.path.join(self.root_dir, self.data[idx])
+        sample = np.load(fpath)
+        context, backchannel, bc_class = sample
+        # print('idx: ', idx)
 
-        n_samples = librosa_time_to_samples(self.context, sr=self.sample_rate)
-        context = torch.zeros(n_samples)
-        back_channel = torch.zeros(n_samples)
-
-        # Find start of context >= 0
-        context_start = end - n_samples
-        if context_start < 0:
-            context_start = 0
-
-        y = self.audio[bc['name']]  # load correct audio array
-        if bc['user'] == 'f':
-            # back channel generator is 'f'
-            tmp_context = y[context_start:end, 0]
-            tmp_back_channel = y[context_start:end, 1]
-        else:
-            # back channel generator is 'g'
-            tmp_context = y[context_start:end, 1]
-            tmp_back_channel = y[context_start:end,0]
-
-        context[-tmp_context.shape[0]:] = tmp_context
-        back_channel[-tmp_back_channel.shape[0]:] = tmp_back_channel
-
-        n_samples_bc = end - start
-        back_channel_class = torch.zeros(back_channel.shape)
-        back_channel_class[-n_samples_bc:] = 1
-
-        # Spectrograms
-        if self.use_spectrogram:
-            context_spec = self.mel_spec(context.unsqueeze(0)).squeeze(0)
-            back_channel_spec = self.mel_spec(back_channel.unsqueeze(0)).squeeze(0)
-
-            bc_frames = librosa_samples_to_frames(n_samples_bc, hop_length=self.hop_length)
-            back_channel_spec_class = torch.zeros(back_channel_spec.shape[0])
-            back_channel_spec_class[-bc_frames:] = 1
-
-            return {'context_audio': context,
-                    'context_spec': context_spec,
-                    'back_channel_audio': back_channel,
-                    'back_channel_spec': back_channel_spec,
-                    'back_channel_class': back_channel_class,
-                    'back_channel_spec_class': back_channel_spec_class,
-                    'back_channel_word': bc['words'][0]}
-        else:
-            return {'context_audio': context,
-                    'back_channel_audio': back_channel,
-                    'back_channel_class': back_channel_class,
-                    'back_channel_word': bc['words'][0]}
+        if self.transform:
+            sample = self.transform(sample)
+            # {'audio_frames': x, 'mel': mel, 'mfcc': mfcc, 'ap': ap, 'f0': f0, 'pitch': pitch}
+        return sample
 
 
-# DataLoaders
-class MaptaskAudioDataloader(DataLoader):
-    def __init__(self, dset, batch_size, pred, seq_len, overlap_len, *args, **kwargs):
+# DataLoader
+class TranformDataloader(DataLoader):
+    def __init__(self, dset, batch_size, frames_in, prediction, verbose=False, *args, **kwargs):
         super().__init__(dset, batch_size, *args, **kwargs)
-        self.seq_len = seq_len
-        self.overlap_len = overlap_len
-        self.pred = pred
-
-    def __iter__(self):
-        for batch in super().__iter__():
-            # batch['back_channel_audio'].shape)
-            # batch['context_audio'].shape)
-            # batch['back_channel_class'].shape)
-            (batch_size, n_samples) = batch['back_channel_audio'].shape
-
-            reset = True
-            for seq_begin in range(self.overlap_len, n_samples, self.seq_len):
-                start = seq_begin - self.overlap_len
-                end = seq_begin + self.seq_len
-
-                bc_class = batch['back_channel_class'][:, start:end]
-                bc_seq = batch['back_channel_audio'][:, start:end]
-                context_seq = batch['context_audio'][:, start:end]
-
-                context = context_seq[:,:-self.pred]
-                self_context = bc_seq[:,:-self.pred]
-                self_context_class = bc_class[:,:-self.pred]
-                target = bc_seq[:, self.overlap_len:].contiguous()
-                target_class = bc_class[:, self.overlap_len:]
-
-                yield {'context': context,
-                       'self_context': self_context,
-                       'self_context_class': self_context_class,
-                       'target': target,
-                       'target_class': target_class,
-                       'reset': reset}
-                reset = False
-
-
-class MaptaskSpecDataloader(DataLoader):
-    def __init__(self, dset, batch_size, pred, seq_len, overlap_len, *args, **kwargs):
-        super().__init__(dset, batch_size, *args, **kwargs)
-        self.seq_len = seq_len
-        self.overlap_len = overlap_len
-        self.pred = pred
-
-    def __iter__(self):
-        for batch in super().__iter__():
-            # batch['context_spec'].shape
-            # batch['back_channel_spec'].shape
-            # batch['back_channel_spec_class'].shape
-            (batch_size, n_frames, features) = batch['back_channel_spec'].shape
-
-            reset = True
-            for seq_begin in range(self.overlap_len, n_frames, self.seq_len):
-                start = seq_begin - self.overlap_len
-                end = seq_begin + self.seq_len
-
-                bc_seq = batch['back_channel_spec'][:, start:end]
-                bc_class = batch['back_channel_spec_class'][:, start:end]
-                context_seq = batch['context_spec'][:, start:end]
-
-                input_seq = (context_seq[:,:-self.pred], bc_seq[:,:-self.pred])
-                target_seq = bc_seq[:, self.overlap_len:].contiguous()
-                target_class = bc_class[:, self.overlap_len:].contiguous()
-                yield (input_seq, reset, target_seq, target_class)
-                reset = False
-
-
-def get_dataset_dataloader(pause=0.5,
-                           context=2,
-                           max_utterences=1,
-                           sample_rate=20000,
-                           use_spectrogram=True,
-                           window_size=512,
-                           hop_length=256,
-                           n_fft=None,
-                           pad=0,
-                           n_mels=40,
-                           torch_load_audio=True,
-                           audio=None,
-                           normalize_audio=True,
-                           root=None,
-                           batch_size=64,
-                           pred=1,
-                           seq_len=10,
-                           overlap_len=2,
-                           n_files=None):
-
-    dset = MaptaskDataset(pause,
-                          context,
-                          max_utterences,
-                          sample_rate,
-                          use_spectrogram,
-                          window_size,
-                          hop_length,
-                          n_fft,
-                          pad,
-                          n_mels,
-                          torch_load_audio,
-                          audio,
-                          normalize_audio,
-                          root,
-                          n_files)
-
-    if use_spectrogram:
-        dloader = MaptaskSpecDataloader(dset, batch_size, pred, seq_len, overlap_len)
-    else:
-        dloader = MaptaskAudioDataloader(dset, batch_size, pred, seq_len,
-                                         overlap_len, drop_last=True)
-    return dset, dloader
-
-
-# Numpy
-class MaptaskDataset2(Dataset):
-    def __init__(self,
-                 sample_rate=20000,
-                 use_spectrogram=False,
-                 window_size=512,
-                 hop_length=256,
-                 n_fft=None,
-                 pad=0,
-                 n_mels=40,
-                 root='data/chopped',
-                 n_files=None):
-        self.root = root
-        self.files = os.listdir(root)
-
-        # Mel
-        self.use_spectrogram = use_spectrogram
-        self.sample_rate = sample_rate
-        self.window_size = window_size
-        self.hop_length = hop_length
-        self.n_fft = n_fft
-        self.pad = pad
-        self.n_mels = n_mels
-
-        self.mel_spec = MelSpectrogram(sr=self.sample_rate,
-                                       ws=self.window_size,
-                                       hop=self.hop_length,
-                                       n_fft=self.n_fft,
-                                       pad=self.pad,
-                                       n_mels=self.n_mels)
-
-    def __len__(self):
-        return len(self.files)
-
-    def __getitem__(self, idx):
-        fpath = join(self.root, self.files[idx])
-        data = np.load(fpath)
-        context, backchannel, bc_class = data
-        context /= data.max()
-        backchannel /= data.max()
-        return {'context': torch.tensor(context).float(),
-                'backchannel': torch.tensor(backchannel).float(),
-                'bc_class': torch.tensor(bc_class).float()}
-
-
-class MaptaskDataloader(DataLoader):
-    def __init__(self, dset, batch_size, seq_len, hop_len, prediction,  *args, **kwargs):
-        super().__init__(dset, batch_size, *args, **kwargs)
-        self.seq_len = seq_len
-        self.hop_len = hop_len
+        self.frames_in = frames_in
         self.prediction = prediction
+        self.use_mel = dset.use_mel
+        self.verbose = verbose
 
     def __iter__(self):
         for batch in super().__iter__():
-            (batch_size, n_samples) = batch['context'].shape
+            context, backchannel, bc_class = batch
+            batch_size, n_frames = context['f0'].shape  # arbitrary choice
+            print('Batch_size: ', batch_size)
+            print('n_frames: ', n_frames)
 
-            reset = True
-            for start in range(n_samples-self.seq_len-self.prediction):
-                end = start + self.seq_len
-                target_start = start + self.prediction
-                target_end = end + self.prediction
+            if self.use_mel:
 
-                context = batch['context'][:, start:end]
-                bc = batch['backchannel'][:, start:end]
-                bc_class = batch['bc_class'][:, start:end]
+                if self.verbose:
+                    print('mel shape: ', context['mel'].shape)
+                    print('mfcc shape: ', context['mfcc'].shape)
+                    print('f0 shape: ', context['f0'].shape)
+                    print('pitch shape: ', context['pitch'].shape)
+                    print('bc_class', bc_class.shape)
+                    input()
 
-                target = batch['backchannel'][:, target_start:target_end]
-                target_class = batch['bc_class'][:, target_start:target_end]
+                reset = True
+                # start: 0 -> 157 - 1
+                for start in range(n_frames - self.frames_in + 1 - self.prediction):
+                    end = start + self.frames_in
+                    target_start = end
+                    target_end = target_start + self.prediction
 
-                yield {'context': context, 'backchannel': bc, 'bc_class':
-                       bc_class, 'target': target, 'target_class': target_class}
-                reset = False
+                    Context = {'mel': context['mel'][:, start:end, :],
+                          'mfcc': context['mfcc'][:, start:end, :],
+                          'f0': context['f0'][:, start:end],
+                          'pitch': context['pitch'][:, start:end]}
+
+                    # Backchannel
+                    BC = {'mel': backchannel['mel'][:, target_start:target_end, :],
+                          'mfcc': backchannel['mfcc'][:, target_start:target_end, :],
+                          'f0': backchannel['f0'][:, target_start:target_end],
+                          'pitch': backchannel['pitch'][:, target_start:target_end],
+                          'bc_class': bc_class[:,target_start:target_end]}
+
+                    yield (Context, BC, reset)
+                    reset = False
+
+            else:
+                if self.verbose:
+                    print('sp shape: ', context['sp'].shape)
+                    print('ap shape: ', context['ap'].shape)
+                    print('f0 shape: ', context['f0'].shape)
+                    print('pitch shape: ', context['pitch'].shape)
+                    print('bc_class', bc_class.shape)
+                    input()
+
+                reset = True
+                # start: 0 -> 157 - 1
+                for start in range(n_frames - self.frames_in + 1 - self.prediction):
+                    end = start + self.frames_in
+                    target_start = end
+                    target_end = target_start + self.prediction
+
+                    Context = {'sp': context['sp'][:, start:end, :],
+                          'ap': context['ap'][:, start:end, :],
+                          'f0': context['f0'][:, start:end],
+                          'pitch': context['pitch'][:, start:end]}
+
+                    # Backchannel
+                    BC = {'sp': backchannel['sp'][:, target_start:target_end, :],
+                          'ap': backchannel['ap'][:, target_start:target_end, :],
+                          'f0': backchannel['f0'][:, target_start:target_end],
+                          'pitch': backchannel['pitch'][:, target_start:target_end],
+                          'bc_class': bc_class[:,target_start:target_end]}
+
+                    yield (Context, BC, reset)
+                    reset = False
 
 
-def save_bc(y, bc, filename, context=2, sr=20000):
-    start, end = bc['sample']
-
-    n_samples = librosa_time_to_samples(context, sr=sr)
-    context = np.zeros(n_samples)
-    back_channel = np.zeros(n_samples)
-
-    # Find start of context >= 0
-    context_start = end - n_samples
-    if context_start < 0:
-        context_start = 0
-
-    if bc['user'] == 'f':
-        # back channel generator is 'f'
-        tmp_context = y[context_start:end, 0]
-        tmp_back_channel = y[context_start:end, 1]
-    else:
-        # back channel generator is 'g'
-        tmp_context = y[context_start:end, 1]
-        tmp_back_channel = y[context_start:end,0]
-
-    context[-tmp_context.shape[0]:] = tmp_context
-    back_channel[-tmp_back_channel.shape[0]:] = tmp_back_channel
-
-    n_samples_bc = end - start
-    back_channel_class = np.zeros(back_channel.shape)
-    back_channel_class[-n_samples_bc:] = 1
-
-    data = np.array((context, back_channel, back_channel_class))
-    np.save(filename, data)
+# Visualizers
+def print_sample_example(dset):
+    print('frame size: ', dset.frame_out_size )
+    print('frames: ', dset.n_frames)
+    print('utterence size: ', dset.utterence_size)
+    print()
+    context, backchannel, bc_class = dset[0]
+    print()
+    print('Context')
+    print('-'*55)
+    for k, v in context.items():
+        print('{}: {}'.format(k, v.shape))
+    print()
+    print('backchannel')
+    print('-'*55)
+    for k, v in backchannel.items():
+        print('{}: {}'.format(k, v.shape))
+    print()
+    print('-'*55)
+    print('bc_class: ', bc_class.shape)
 
 
-def chunk_audio(bc_list, loadpath, savepath, context=2, sr=20000):
-    pathlib.Path(savepath).mkdir(parents=True, exist_ok=True)
-    name = ''
-    n = 0
-    for bc in tqdm(bc_list):
-        if name != bc['name']:
-            name = bc['name']
-            fpath = join(loadpath, name + '.mix.wav')
-            y, sr = torchaudio.load(fpath)
-            y = y.numpy()
-            filename = join(savepath, name + '_' + str(n))
-            save_bc(y, bc, filename, context, sr)
+def plot_sample_example(dset, datatype='context', idx=None):
+    def plot_sample(data, datatype='context'):
+        plt.figure(datatype)
+        i = 1
+        n = 5 if datatype == 'backchannel' else 4
+        if dset.use_mel:
+            plt.subplot(n,1,i); i+=1
+            plt.title('Mel Spectrogram')
+            specshow(np.log(data['mel']).T, sr=dset.sr, hop_length=dset.hop_length,
+                     y_axis='mel', cmap='magma')
+            plt.subplot(n,1,i); i+=1
+            plt.title('MFCC')
+            specshow(data['mfcc'].T, sr=dset.sr, hop_length=dset.hop_length, cmap='magma')
+            # plt.plot([m for m in data['mfcc'].T])
         else:
-            filename = join(savepath, name + '_' + str(n))
-            save_bc(y, bc, filename, context, sr)
-        n += 1
+            plt.subplot(n,1,i); i+=1
+            plt.title('Spectrogram')
+            specshow(np.log(data['sp']).T, sr=dset.sr, hop_length=dset.hop_length,
+                     y_axis='linear', cmap='magma')
+            plt.subplot(n,1,i); i+=1
+            plt.title('Aperiodicity')
+            specshow(data['ap'].T, sr=dset.sr, hop_length=dset.hop_length,
+                     y_axis='linear', cmap='magma')
+        plt.subplot(n,1,i); i+=1
+        plt.title('F0')
+        plt.plot(data['f0'])
+        plt.xlim(0, len(data['f0']))
+        plt.xticks([])
+        plt.subplot(n,1,i); i+=1
+        plt.title('Pitch')
+        plt.plot(data['pitch'])
+        plt.xlim(0, len(data['pitch']))
+        if datatype=='backchannel':
+            plt.xticks([])
+            plt.subplot(n,1,i); i+=1
+            plt.plot(bc_class)
+            plt.xlim(0, len(bc_class))
+            plt.title('backchannel activation')
+    if not idx:
+        idx = np.random.randint(len(dset))
+    context, backchannel, bc_class = dset[idx]
+    plot_sample(context)
+    plt.tight_layout()
+    plt.show()
+    plt.close()
+    plot_sample(backchannel, datatype='backchannel')
+    plt.tight_layout()
+    plt.show()
+    plt.close()
+
+
+def synthesize_audio(dset):
+    import sounddevice as sd
+    sd.default.samplerate = dset.sr
+    for f in range(10):
+        context, bc, bc_class = dset[np.random.randint(len(dset))]
+        y = pyworld.synthesize(context['f0'],
+                               context['sp'],
+                               context['ap'],
+                               dset.sr,
+                               dset.frame_period)
+        y = y/y.max() * 0.91
+        sd.play(y)
+        input()
 
 
 if __name__ == "__main__":
-    print('maptask annotaions')
-    paths = get_paths()
+    root_dir = '/Users/erik/maptaskdataset/maptask/data/processed'
 
-    dset = MaptaskDataset2()
-    dloader = MaptaskDataloader(dset, batch_size=32, seq_len=10, hop_len=5,
-                                prediction=1)
+    # Dataset with transform
+    use_mel = False
+    print('Use mel: ', use_mel)
+    dset = TransformDataset(root_dir, use_mel=use_mel, norm_mfcc=False)
+    dloader = TranformDataloader(dset,
+                                 batch_size=3,
+                                 frames_in=5,
+                                 prediction=1,
+                                 verbose=False,
+                                 num_workers=4)
 
-    for batch in dloader:
-        print(batch['context'].shape)
-        print(batch['backchannel'].shape)
-        print(batch['bc_class'].shape)
-        print(batch['target'].shape)
-        print(batch['target_class'].shape)
-        input()
+    ans = input('Iterate through dataloader? (y/n)')
+    if ans == 'y' or ans == 'Y':
+        for i, batch in enumerate(dloader):
+            context, bc, RESET_RNN = batch
+            print('Mini-batch: ', i)
+            if RESET_RNN:
+                print('RNN reset')
+            print('\nInput\t Target')
+            for (kd,vk), (kt, vt) in zip(context.items(), bc.items()):
+                print('{} : {}\t {}'.format(kd, vk.shape, vt.shape))
+            ans = input('Press Enter to continue: ')
+            if ans:
+                break
 
-    import sounddevice as sd
-    sd.default.samplerate=20000
+    # Visualize
+    ans = input('Visualize samples? (y/n)')
+    if ans == 'y' or ans == 'Y':
+        # print_sample_example(dset)
+        while True:
+            plot_sample_example(dset)
+            ans = input('Press any key except Enter to stop')
+            if ans:
+                break
 
-    sd.play(np.stack((context, backchannel), axis=1))
-    sd.play(bc_class)
 
-    # print('PyTorch datasets & loader')
-    # print('Creating Dataset and loading audio')
-    # dset = MaptaskDataset(pause=0.5, max_utterences=1)
-    # audio = dset.audio
+    # Synthesize Audio
+    if not dset.use_mel:
+        synthesize_audio(dset, batch_size=32, frames_in=1, prediction=1, num_workers=2)
 
-    # # for reusing audio in REPL
-    # dset = MaptaskDataset(pause=0.5, max_utterences=1, context=2, audio=audio)
+    import sys
+    sys.exit(0)
 
-    # # ---------------------------------------------------------------------
-    # print('Audio: DataLoader')
-    # maploader = MaptaskAudioDataloader(dset, pred=1, seq_len=300, overlap_len=100, batch_size=128, num_workers=4)
-    # for batch in maploader:
-    #     print(type(batch))
-    #     print(batch[0][0].shape)
-    #     print(batch[0][1].shape)
-    #     print(batch[1])
-    #     print(batch[2].shape)
-    #     ans = input('Press n for quit')
-    #     if ans == 'n':
-    #         break
+    # TODO
+    # Make ipynb comparing extraction methods
+    # Plot f0 & pitch
+    # Load Data
+    testpath = "/Users/erik/maptaskdataset/maptask/data/dialogues/q1ec1.mix.wav"
+    sr, wav = wavfile.read(testpath)
+    duration = 8
+    wav = wav[:sr*duration]
+    x = wav[:sr*duration, 0]
+    x = np.ascontiguousarray(wav[:16000, 0]).astype(np.float64)
 
-    # # ---------------------------------------------------------------------
-    # print('Spectrogram: DataLoader')
-    # maploader = MaptaskSpecDataloader(dset, pred=1, seq_len=10, overlap_len=2, batch_size=128, num_workers=4)
-    # for batch in maploader:
-    #     print(type(batch))
-    #     print(batch[0][0].shape)
-    #     print(batch[0][1].shape)
-    #     print(batch[1])
-    #     print(batch[2].shape)
-    #     print(batch[3].shape)
-    #     ans = input('Press n for quit')
-    #     if ans == 'n':
-    #         break
+    pysptk_pitch = pysptk.swipe(x[:2000], fs=sr, hopsize=hop_length,
+                                min=f0_floor, max=f0_ceil, otype="pitch")
+    pyspkt_f0_swipe = pysptk.swipe(x, fs=sr, hopsize=hop_length,
+                                   min=f0_floor, max=f0_ceil, otype="f0")
+    pyspkt_f0_rapt = pysptk.rapt(x.astype(np.float32), fs=sr, hopsize=hop_length,
+                                 min=f0_floor, max=f0_ceil, otype="f0")
+    f0, timeaxis = pyworld.dio(x, fs=sr, f0_floor=f0_floor,
+                               f0_ceil=f0_ceil, frame_period=frame_period)
+    f0 = pyworld.stonemask(x, f0, timeaxis, fs)
 
-    # # ---------------------------------------------------------------------
 
-    # print('Listen to audio datapoints')
-    # while True:
-    #     idx = int(torch.randint(len(dset), (1,)).item())
-    #     output = dset[idx]
-    #     visualize_datapoint(output)
-    #     sound_datapoint(output)
-    #     ans = input('Press n for quit')
-    #     if ans == 'n':
-    #         break
+
+    # Spectrogram: magnitude**2
+    sp = pyworld.cheaptrick(x, f0, timeaxis, fs, fft_size=fft_length)  
+    mel_spec = pysptk.sp2mc(sp, order=order, alpha=alpha)
+    ap = pyworld.d4c(x, f0, timeaxis, fs, fft_size=fft_length)  # Aperiodicity
+    mel_spec_audio = audio.melspectrogram(x)
+    mfcc = pysptk.mfcc(mel_spec, fs=sr, alpha=alpha, order=80, num_filterbanks=100)
+    mfcc = standardize_mfcc(mfcc)
+    energy = pysptk.mc2e(mel_spec, alpha=alpha)

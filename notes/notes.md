@@ -1,4 +1,4 @@
-# Notes on Maptask
+# Notes for Maptask
 
 [HCRC Map Task](http://journals.sagepub.com/doi/abs/10.1177/002383099103400404) corpus (Anderson et al., 1991) 
 

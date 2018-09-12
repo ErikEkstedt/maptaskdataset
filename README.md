@@ -43,12 +43,15 @@
 
 ## Knowledge Sources
 
+
+* [Signal Processing](https://github.com/calebmadrigal/FourierTalkOSCON)
 * [nnmnkwii_gallery](https://github.com/r9y9/nnmnkwii_gallery.git)
 * [nnmnkwii](https://github.com/r9y9/nnmnkwii.git)
 * [wavenet_vocoder](https://github.com/r9y9/wavenet_vocoder)
 * [pysptk](https://github.com/r9y9/pysptk)
 * [Tacotron](https://github.com/r9y9/pysptk)
 
+([Cool Notebook source](https://github.com/jupyter/jupyter/wiki/A-gallery-of-interesting-Jupyter-Notebooks#machine-learning-statistics-and-probability))
 
 ## Goal
 

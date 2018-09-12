@@ -35,23 +35,32 @@
     - `plot_sample_example(dset, datatype='context', idx=None)`
 
 
-## Notebook
+## Notebooks
 
-[notebook status](https://github.com/ErikEkstedt/maptaskdataset/blob/master/maptask/notes/programming.ipynb)
+* [transforms](notes/transforms.ipynb)
+  - Which packages to use in python for audio transformations
+* [programming](notes/programming.ipynb)
+
+## Knowledge Sources
+
+* [nnmnkwii_gallery](https://github.com/r9y9/nnmnkwii_gallery.git)
+* [nnmnkwii](https://github.com/r9y9/nnmnkwii.git)
+* [wavenet_vocoder](https://github.com/r9y9/wavenet_vocoder)
+* [pysptk](https://github.com/r9y9/pysptk)
+* [Tacotron](https://github.com/r9y9/pysptk)
 
 
-## Step 1
+## Goal
 
 The goal of this code is to extract backchannel data from the maptask dataset in order
-to train a model to generate backchannels conditioned on audio input. A speech-to-speech
-model that hopefully captures some prosodic nuance and timings for backchannel generation.
+to train a model to generate backchannels conditioned on audio input.
 
 1. Merge together utterences defined in one speaker that are seperated less than `$pause`
 2. Get all utterences consisting of only one word. Decide on which one word phrases are
    constituting a backchannel.
 3. Define how large the `context` is, i.e how many seconds before the backchannel is part of
    the datapoint.
-4. Extract all backchannels with `context` as audio and text
-5. [x] Create PyTorch Dataset and DataLoader
+4. Extract all `backchannels` with `context`
+5. Create PyTorch Dataset and DataLoader
 
 

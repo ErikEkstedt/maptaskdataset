@@ -127,6 +127,7 @@ class TransformDataset(Dataset):
         self.fft_length = fft_length
         self.hop_length = hop_length
         self.ap_size = fft_length // 2 + 1  # 1024 -> 513
+        self.sp_size = fft_length // 2 + 1  # 1024 -> 513
         self.n_mfcc = n_mfcc
         self.norm_mfcc = norm_mfcc
         self.use_mel = use_mel
@@ -151,12 +152,26 @@ class TransformDataset(Dataset):
                                         bc_threshold)
         # Dimensions
         self.n_frames = sr*context // hop_length + 1  # 157
-        # out_size = n_mels + n_mfcc + n_ap_channels + f0 + pitch + bc_class
-        # => 128 + 20 + 513 + 1 + 1 + 1 = 664
-        self.frame_out_size = self.n_mels + self.n_mfcc + self.ap_size + 1 + 1 + 1
-        # times 2 channels (speaker, backchanneler)
-        # => 663 * 2 = 1326
-        self.utterence_size = 2*self.frame_out_size*self.n_frames
+        if use_mel:
+            # context = n_mels + n_mfcc + n_ap_channels + f0 + pitch
+            # bc = n_mels + n_mfcc + n_ap_channels + f0 + pitch + bc_class
+            # => 128 + 20 + 1 + 1 + 1 = 
+            self.bc_size = self.n_mels + self.n_mfcc + 1 + 1 + 1
+            self.context_size = self.n_mels + self.n_mfcc + 1 + 1
+            # times 2 channels (speaker, backchanneler)
+            # => 663 * 2 = 1326
+            self.utterence_size = 2*self.frame_out_size*self.n_frames
+        else:
+            # context = sp + ap + f0 + pitch
+            # bc = sp + ap + f0 + pitch + bc_class
+            # => 513 + 513 + 1 + 1 = 1028
+            self.bc_size = self.sp_size + self.ap_size + 1 + 1 + 1
+            self.context_size = self.sp_size + self.ap_size + 1 + 1
+            # times 2 channels (speaker, backchanneler)
+            # => 663 * 2 = 1326
+
+    def get_data_dims(self):
+        return {'bc_size': self.bc_size, 'context_size': self.context_size}
 
     def __len__(self):
         return len(self.data)
@@ -175,12 +190,22 @@ class TransformDataset(Dataset):
 
 # DataLoader
 class TranformDataloader(DataLoader):
-    def __init__(self, dset, batch_size, frames_in, prediction, verbose=False, *args, **kwargs):
+    def __init__(self, dset, batch_size, frames_in, frames_out, verbose=False, *args, **kwargs):
         super().__init__(dset, batch_size, *args, **kwargs)
         self.frames_in = frames_in
-        self.prediction = prediction
+        self.frames_out = frames_out
         self.use_mel = dset.use_mel
         self.verbose = verbose
+
+    def get_data_dims(self):
+        dset_dims = self.dataset.get_data_dims()
+        bc_size = dset_dims['bc_size']
+        context_size = dset_dims['context_size']
+
+        # Frames in/out
+        context_size = (self.frames_in, context_size)
+        bc_size = (self.frames_out, bc_size)
+        return {'bc_size': bc_size, 'context_size': context_size}
 
     def __iter__(self):
         for batch in super().__iter__():
@@ -201,10 +226,11 @@ class TranformDataloader(DataLoader):
 
                 reset = True
                 # start: 0 -> 157 - 1
-                for start in range(n_frames - self.frames_in + 1 - self.prediction):
+                for start in range(n_frames - self.frames_in + 1 -
+                                   self.frames_out):
                     end = start + self.frames_in
                     target_start = end
-                    target_end = target_start + self.prediction
+                    target_end = target_start + self.frames_out
 
                     Context = {'mel': context['mel'][:, start:end, :],
                           'mfcc': context['mfcc'][:, start:end, :],
@@ -232,10 +258,11 @@ class TranformDataloader(DataLoader):
 
                 reset = True
                 # start: 0 -> 157 - 1
-                for start in range(n_frames - self.frames_in + 1 - self.prediction):
+                for start in range(n_frames - self.frames_in + 1 -
+                                   self.frames_out):
                     end = start + self.frames_in
                     target_start = end
-                    target_end = target_start + self.prediction
+                    target_end = target_start + self.frames_out
 
                     Context = {'sp': context['sp'][:, start:end, :],
                           'ap': context['ap'][:, start:end, :],
@@ -292,7 +319,11 @@ def plot_sample_example(dset, datatype='context', idx=None):
         else:
             plt.subplot(n,1,i); i+=1
             plt.title('Spectrogram')
-            specshow(np.log(data['sp']).T, sr=dset.sr, hop_length=dset.hop_length,
+            # specshow(np.log(data['sp']).T, sr=dset.sr, hop_length=dset.hop_length,
+            #          y_axis='linear', cmap='magma')
+            sp = data['sp'] / data['sp'].max()
+            # sp *= 80
+            specshow(np.log(sp).T, sr=dset.sr, hop_length=dset.hop_length,
                      y_axis='linear', cmap='magma')
             plt.subplot(n,1,i); i+=1
             plt.title('Aperiodicity')
@@ -351,7 +382,7 @@ if __name__ == "__main__":
     dloader = TranformDataloader(dset,
                                  batch_size=3,
                                  frames_in=5,
-                                 prediction=1,
+                                 frames_out=1,
                                  verbose=False,
                                  num_workers=4)
 
@@ -382,7 +413,7 @@ if __name__ == "__main__":
 
     # Synthesize Audio
     if not dset.use_mel:
-        synthesize_audio(dset, batch_size=32, frames_in=1, prediction=1, num_workers=2)
+        synthesize_audio(dset, batch_size=32, frames_in=1, frames_out=1, num_workers=2)
 
     import sys
     sys.exit(0)

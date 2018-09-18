@@ -5,49 +5,50 @@ from scipy.io import wavfile
 import matplotlib.pyplot as plt
 
 import pysptk
-import pyworld
 import librosa
 from librosa.display import specshow, waveplot
 from torch.utils.data import Dataset, DataLoader
+from maptask.transforms import PitchIntensityPraat, MelFeatures
 
 
-# Transform
-class SpeechFeatures(object):
+# Transforms
+class PitchIntensityDataset(Dataset):
     def __init__(self,
+                 root_dir,
                  sr=20000,
                  fft_length=1024,
                  hop_length=256,
                  frame_period=12.8,
-                 alpha=0.441,
-                 order=127,
-                 f0_floor=71.,
-                 f0_ceil=800.,
-                 n_mfcc=20,
-                 norm_mfcc=True,
-                 use_mel=False,
+                 pitch_floor=71.,
+                 pitch_ceiling=800.,
                  bc_threshold=0.33):
+        """
+        Args:
+        root_dir (string): Directory with all the wav.
+        transform (callable, optional): Optional transform to be applied
+        on a sample.
+        """
+        self.root_dir = root_dir
+        self.data = [f for f in glob(os.path.join(root_dir, '*.npy'))]
+
+        # Transform
         self.sr = sr
         self.fft_length = fft_length
         self.hop_length = hop_length
         self.frame_period = frame_period
-        self.alpha = alpha
-        self.order = order
-        self.f0_floor = f0_floor
-        self.f0_ceil = f0_ceil
-        self.n_mfcc = n_mfcc
-        self.norm_mfcc = norm_mfcc
-        self.use_mel = use_mel
+        self.pitch_floor = pitch_floor
+        self.pitch_ceiling= pitch_ceiling
         self.bc_threshold = bc_threshold
+        self.transform = PitchIntensityPraat(sr=sr,
+                                             hop_length=hop_length,
+                                             pitch_floor=pitch_floor,
+                                             pitch_ceiling=pitch_ceiling)
 
+    def get_data_dims(self):
+        return {'bc_size': self.bc_size, 'context_size': self.context_size}
 
-    def standardize_mfcc(self, mfcc):
-        ''' Standardize the mfcc values over time
-        mfcc (T, D)
-        '''
-        mean = mfcc.mean(0) # (D,)
-        std = mfcc.std(0)   # (D,)
-        standard = (mfcc - mean) / std
-        return standard
+    def __len__(self):
+        return len(self.data)
 
     def samples_to_frames(self, x):
         pad = len(x) % self.hop_length
@@ -68,32 +69,65 @@ class SpeechFeatures(object):
                 bc_new.append(0.)
         return np.array(bc_new)
 
-    def process_audio(self, x):
-        pitch = pysptk.swipe(x, fs=self.sr, hopsize=self.hop_length, min=self.f0_floor, max=self.f0_ceil, otype="pitch")
-        f0, timeaxis = pyworld.dio(x, fs=self.sr, f0_floor=self.f0_floor, f0_ceil=self.f0_ceil, frame_period=self.frame_period)
-        f0 = pyworld.stonemask(x, f0, timeaxis, self.sr)
+    def __getitem__(self, idx):
+        fpath = os.path.join(self.root_dir, self.data[idx])
+        # sample = np.load(fpath)
+        # context, backchannel, bc_class = sample
+        context, backchannel, bc_class = np.load(fpath)
 
-        # x_frame = self.samples_to_frames(x)
+        data = {}
+        pitch, intensity = self.transform(context)
+        context =  {'pitch': pitch, 'intensity': intensity}
 
-        if self.use_mel:
-            mel = librosa.feature.melspectrogram(x, sr=self.sr, n_fft=self.fft_length, hop_length=self.hop_length)
-            mfcc = librosa.feature.mfcc(S=mel, sr=self.sr, n_mfcc=self.n_mfcc)
-            if self.norm_mfcc:
-                mfcc = self.standardize_mfcc(mfcc)
-            return {'mel': mel.T, 'mfcc': mfcc.T, 'f0': f0, 'pitch': pitch}
-        else:
-            ap = pyworld.d4c(x, f0, timeaxis, self.sr, fft_size=self.fft_length)  # Aperiodicity
-            sp = pyworld.cheaptrick(x, f0, timeaxis, self.sr,
-                                    fft_size=self.fft_length)
-            return {'sp': sp, 'ap': ap, 'f0': f0, 'pitch': pitch}
-
-    def __call__(self, sample):
-        context, backchannel, bc_class = sample
-        context = self.process_audio(context)
-        backchannel = self.process_audio(backchannel)
+        pitch, intensity = self.transform(backchannel)
         bc_class = self.backchannel_activation_to_frames(bc_class)
-        return context, backchannel, bc_class
+        backchannel = {'pitch': pitch, 'intensity': intensity, 'bc_class': bc_class}
+        return context, backchannel
 
+
+class PIDataLoader(DataLoader):
+    def __init__(self, dset, batch_size, frames_in, frames_out, verbose=False, *args, **kwargs):
+        super().__init__(dset, batch_size, *args, **kwargs)
+        self.frames_in = frames_in
+        self.frames_out = frames_out
+        self.verbose = verbose
+
+    def get_data_dims(self):
+        dset_dims = self.dataset.get_data_dims()
+        bc_size = dset_dims['bc_size']
+        context_size = dset_dims['context_size']
+
+        # Frames in/out
+        context_size = (self.frames_in, context_size)
+        bc_size = (self.frames_out, bc_size)
+        return {'bc_size': bc_size, 'context_size': context_size}
+
+    def __iter__(self):
+        for batch in super().__iter__():
+            context, backchannel = batch
+            batch_size, n_frames = context['pitch'].shape  # arbitrary choice
+            print('Batch_size: ', batch_size)
+            print('n_frames: ', n_frames)
+
+            reset = True
+            # start: 0 -> 157 - 1
+            for start in range(n_frames - self.frames_in + 1 -
+                               self.frames_out):
+                end = start + self.frames_in
+                target_start = end
+                target_end = target_start + self.frames_out
+
+                # TODO
+                Context = {'pitch': context['pitch'][:, start:end],
+                           'intensity': context['intensity'][:, start:end]}
+
+                # Backchannel
+                BC = {'pitch': backchannel['pitch'][:,target_start:target_end],
+                      'intensity': backchannel['intensity'][:,target_start:target_end],
+                      'bc_class': backchannel['bc_class'][:,target_start:target_end]}
+
+                yield (Context, BC, reset)
+                reset = False
 
 # Dataset
 class TransformDataset(Dataset):
@@ -155,7 +189,7 @@ class TransformDataset(Dataset):
         if use_mel:
             # context = n_mels + n_mfcc + n_ap_channels + f0 + pitch
             # bc = n_mels + n_mfcc + n_ap_channels + f0 + pitch + bc_class
-            # => 128 + 20 + 1 + 1 + 1 = 
+            # => 128 + 20 + 1 + 1 + 1 =
             self.bc_size = self.n_mels + self.n_mfcc + 1 + 1 + 1
             self.context_size = self.n_mels + self.n_mfcc + 1 + 1
             # times 2 channels (speaker, backchanneler)
@@ -175,6 +209,17 @@ class TransformDataset(Dataset):
 
     def __len__(self):
         return len(self.data)
+
+    def backchannel_activation_to_frames(self, bc):
+        bc = self.samples_to_frames(bc)
+        frames = bc.shape[0]
+        bc_new = []
+        for b in bc:
+            if b.sum() > int(frames*self.bc_threshold):
+                bc_new.append(1.)
+            else:
+                bc_new.append(0.)
+        return np.array(bc_new)
 
     def __getitem__(self, idx):
         fpath = os.path.join(self.root_dir, self.data[idx])
@@ -372,13 +417,7 @@ def synthesize_audio(dset):
         input()
 
 
-if __name__ == "__main__":
-    root_dir = '/Users/erik/maptaskdataset/maptask/data/processed'
-
-    # Dataset with transform
-    use_mel = False
-    print('Use mel: ', use_mel)
-    dset = TransformDataset(root_dir, use_mel=use_mel, norm_mfcc=False)
+def demo(dset):
     dloader = TranformDataloader(dset,
                                  batch_size=3,
                                  frames_in=5,
@@ -410,42 +449,87 @@ if __name__ == "__main__":
             if ans:
                 break
 
-
     # Synthesize Audio
     if not dset.use_mel:
         synthesize_audio(dset, batch_size=32, frames_in=1, frames_out=1, num_workers=2)
 
-    import sys
-    sys.exit(0)
 
-    # TODO
-    # Make ipynb comparing extraction methods
-    # Plot f0 & pitch
-    # Load Data
-    testpath = "/Users/erik/maptaskdataset/maptask/data/dialogues/q1ec1.mix.wav"
-    sr, wav = wavfile.read(testpath)
-    duration = 8
-    wav = wav[:sr*duration]
-    x = wav[:sr*duration, 0]
-    x = np.ascontiguousarray(wav[:16000, 0]).astype(np.float64)
-
-    pysptk_pitch = pysptk.swipe(x[:2000], fs=sr, hopsize=hop_length,
-                                min=f0_floor, max=f0_ceil, otype="pitch")
-    pyspkt_f0_swipe = pysptk.swipe(x, fs=sr, hopsize=hop_length,
-                                   min=f0_floor, max=f0_ceil, otype="f0")
-    pyspkt_f0_rapt = pysptk.rapt(x.astype(np.float32), fs=sr, hopsize=hop_length,
-                                 min=f0_floor, max=f0_ceil, otype="f0")
-    f0, timeaxis = pyworld.dio(x, fs=sr, f0_floor=f0_floor,
-                               f0_ceil=f0_ceil, frame_period=frame_period)
-    f0 = pyworld.stonemask(x, f0, timeaxis, fs)
+if __name__ == "__main__":
+    root_dir = '/Users/erik/maptaskdataset/maptask/data/processed'
+    use_mel = False
+    print('Use mel: ', use_mel)
+    dset = TransformDataset(root_dir, use_mel=use_mel, norm_mfcc=False)
+    demo(dset)
 
 
+    from tqdm import tqdm
+    root_dir = '/home/erik/Audio/maptaskdataset/maptask/data/processed'
+    dset = PitchIntensityDataset(root_dir)
 
-    # Spectrogram: magnitude**2
-    sp = pyworld.cheaptrick(x, f0, timeaxis, fs, fft_size=fft_length)  
-    mel_spec = pysptk.sp2mc(sp, order=order, alpha=alpha)
-    ap = pyworld.d4c(x, f0, timeaxis, fs, fft_size=fft_length)  # Aperiodicity
-    mel_spec_audio = audio.melspectrogram(x)
-    mfcc = pysptk.mfcc(mel_spec, fs=sr, alpha=alpha, order=80, num_filterbanks=100)
-    mfcc = standardize_mfcc(mfcc)
-    energy = pysptk.mc2e(mel_spec, alpha=alpha)
+
+    c_pitch, c_intensity = [], []
+    bc_pitch, bc_intensity, bc_class = [], [], []
+    for d in tqdm(dset):
+        context, bc = d
+        c_pitch.append(context['pitch'])
+        c_intensity.append(context['intensity'])
+        bc_pitch.append(bc['pitch'])
+        bc_intensity.append(bc['intensity'])
+        bc_class.append(bc['bc_class'])
+        # print('context pitch: ', context['pitch'].shape)
+        # print('context intensity: ', context['intensity'].shape)
+        # print(bc.keys())
+        # print('backchannel pitch: ', bc['pitch'].shape)
+        # print('backchannel intensity: ', bc['intensity'].shape)
+        # input()
+
+    pitch = np.array([c_pitch, bc_pitch])
+    intensity = np.array([c_intensity , bc_intensity])
+
+    p_stand = (pitch - pitch.mean()) / pitch.std()
+    i_stand = (intensity - intensity.mean()) / intensity.std()
+
+    np.save('data/pitch.npy', pitch)
+    np.save('data/intensity.npy', intensity)
+    np.save('data/pitch_stand.npy', p_stand)
+    np.save('data/intensity_stand.npy', i_stand)
+
+
+    pidloader = PIDataLoader(dset,
+                           batch_size=128,
+                           frames_in=5,
+                           frames_out=1,
+                           verbose=False,
+                           num_workers=4)
+
+    # Todo
+    # Save data directly... way too much overhead to extract features on demand
+    # ~153 frames in one 2 sec bc-snippet
+    # Each frame: 2 values -> 3 out (pitch, intensity, class)
+    for d in pidloader:
+        context, bc, new_sequence = d
+        print(context.keys())
+        print('context pitch: ', context['pitch'].shape)
+        print('context intensity: ', context['intensity'].shape)
+        print(bc.keys())
+        print('backchannel pitch: ', bc['pitch'].shape)
+        print('backchannel intensity: ', bc['intensity'].shape)
+        print(new_sequence)
+        input()
+
+    dloader = DataLoader(dset, batch_size=64)
+    for d in tqdm(dloader):
+        context, bc = d
+        print(context.keys())
+        print('context pitch: ', context['pitch'].shape)
+        print('context intensity: ', context['intensity'].shape)
+        print(bc.keys())
+        print('backchannel pitch: ', bc['pitch'].shape)
+        print('backchannel intensity: ', bc['intensity'].shape)
+        print(new_sequence)
+        input()
+
+
+
+
+

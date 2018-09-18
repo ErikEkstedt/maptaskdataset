@@ -10,7 +10,7 @@ from librosa import samples_to_frames as librosa_samples_to_frames
 import numpy as np
 
 import torch
-import torchaudio
+# import torchaudio
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -260,8 +260,10 @@ def chunk_audio(bc_list, loadpath, savepath, context=2, sr=20000):
             fpath = join(loadpath, name + '.mix.wav')
             # TODO
             # Only thing I ended up using torchaudio for?
-            y, sr = torchaudio.load(fpath)
-            y = y.numpy()
+            # y, sr = torchaudio.load(fpath)
+            # y = y.numpy()
+            sr, y = read(fpath)
+            y = y.as_type(np.float)
             filename = join(savepath, name + '_' + str(n))
             save_bc(y, bc, filename, context, sr)
         else:

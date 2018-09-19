@@ -1,4 +1,6 @@
 maptask/data/*
+maptask/checkpoints/*
+maptask/runs/*
 
 .DS_St*
 

@@ -461,11 +461,9 @@ if __name__ == "__main__":
     dset = TransformDataset(root_dir, use_mel=use_mel, norm_mfcc=False)
     demo(dset)
 
-
     from tqdm import tqdm
     root_dir = '/home/erik/Audio/maptaskdataset/maptask/data/processed'
     dset = PitchIntensityDataset(root_dir)
-
 
     c_pitch, c_intensity = [], []
     bc_pitch, bc_intensity, bc_class = [], [], []
@@ -485,14 +483,8 @@ if __name__ == "__main__":
 
     pitch = np.array([c_pitch, bc_pitch])
     intensity = np.array([c_intensity , bc_intensity])
-
     p_stand = (pitch - pitch.mean()) / pitch.std()
     i_stand = (intensity - intensity.mean()) / intensity.std()
-
-    np.save('data/pitch.npy', pitch)
-    np.save('data/intensity.npy', intensity)
-    np.save('data/pitch_stand.npy', p_stand)
-    np.save('data/intensity_stand.npy', i_stand)
 
 
     pidloader = PIDataLoader(dset,

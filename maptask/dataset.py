@@ -3,7 +3,7 @@ from glob import glob
 import numpy as np
 from scipy.io import wavfile
 import matplotlib.pyplot as plt
-
+from sklearn.model_selection import train_test_split
 import torch
 
 import pysptk
@@ -236,29 +236,59 @@ class TransformDataset(Dataset):
 
 
 # DataLoader
-
 ## Simplest of dataset. Loads numpy files from memory pitch and intensity
 class DSet(Dataset):
-    def __init__(self, root_dir='data'):
+    def __init__(self, root_dir='data', test_split=0.1):
         self.root_dir = root_dir
-        self.pitch = torch.tensor(np.load(os.path.join(root_dir, 'pitch.npy'))[:, :,
-                                                                       :-1]).float()
-        self.intensity = torch.tensor(np.load(os.path.join(root_dir,
-                                                   'intensity.npy'))).float()
+        # self.pitch = torch.tensor(np.load(os.path.join(root_dir, 'pitch.npy'))[:, :,
+        #                                                                :-1]).float()
+        # self.intensity = torch.tensor(np.load(os.path.join(root_dir,
+        #                                            'intensity.npy'))).float()
+        self.test_split = test_split
+        self.train = True
+
+        pitch = np.load(os.path.join(root_dir, 'pitch.npy')).reshape(-1, 153, 2)[:,:-1, :]
+        intensity = np.load(os.path.join(root_dir, 'intensity.npy')).reshape(-1, 152, 2)
+
+        # print('pitch.shape', pitch.shape)
+        # print('intensity.shape', intensity.shape)
+
+        pitch_train, pitch_test, \
+            intensity_train , intensity_test = train_test_split(pitch,
+                                                                intensity,
+                                                                test_size=test_split,
+                                                                random_state=42)
+
+        # print('pitch_train.shape', pitch_train.shape)
+        # print('intensity_train.shape', intensity_train.shape)
+
+        self.train_data = {'pitch': torch.from_numpy(pitch_train).float(),
+                           'intensity': torch.from_numpy(intensity_train).float()}
+        self.test_data = {'pitch': torch.from_numpy(pitch_test).float(),
+                          'intensity': torch.from_numpy(intensity_test).float()}
 
     def __len__(self):
-        return self.pitch.shape[1]
+        if self.train:
+            return self.train_data['pitch'].shape[0]
+        else:
+            return self.test_data['pitch'].shape[0]
 
     def get_random(self):
         return self[np.random.randint(len(self))]
 
     def __getitem__(self, idx):
-        data = torch.stack((self.pitch[0, idx, :-1],
-                           self.intensity[0, idx, :-1],
-                           self.pitch[1, idx, :-1],
-                           self.intensity[1, idx, :-1]))
-        target = torch.stack((self.pitch[1, idx, 1:],
-                              self.intensity[1, idx, 1:]))
+        if self.train:
+            pitch = self.train_data['pitch']
+            intensity = self.train_data['intensity']
+        else:
+            pitch = self.test_data['pitch']
+            intensity = self.test_data['intensity']
+        data = torch.stack((pitch[idx, :-1, 0],
+                           intensity[idx, :-1, 0],
+                           pitch[idx, :-1, 1],
+                           intensity[idx, :-1, 1]), dim=1)
+        target = torch.stack((pitch[idx, 1:, 1],
+                              intensity[idx, 1:, 1]), dim=1)
         return data, target
 
 

@@ -1,5 +1,6 @@
 import numpy as np
 from tqdm import tqdm
+import math
 
 from maptask.dataset import DSet
 from maptask.models import BasicLstm
@@ -15,7 +16,6 @@ from torch.utils.data import DataLoader
 dset = DSet()
 dloader = DataLoader(dset, batch_size=64, shuffle=True)
 
-
 # Tensorboard
 use_tensorboard = True
 if use_tensorboard:
@@ -25,20 +25,21 @@ else:
     data, targets = dset[np.random.randint(len(dset))]
     plot_pitch_intensity(data[0], data[1])
 
-
 # Simple training loop for training a basic lstm model
 # in -> lstm -> fc-layer -> out
+
+n_epochs = 100
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 for rnn_layers in [2, 5, 10, 15, 20]:
     # Model
-    n_epochs = 100
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print('Training with {} rnn layers'.format(rnn_layers))
     model = BasicLstm(rnn_layers=rnn_layers, dropout=0.5).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=0.01)
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
     loss_fn = nn.MSELoss()
-    model
 
     model.train()
     epoch_loss = []
+    best_epoch_loss = math.inf
     i = 0
     for epoch in range(1, n_epochs+1):
         batch_loss = []
@@ -59,10 +60,13 @@ for rnn_layers in [2, 5, 10, 15, 20]:
             i += 1
         tmp_epoch_loss = torch.tensor(batch_loss).mean().item()
         epoch_loss.append(tmp_epoch_loss)
+        if tmp_epoch_loss < best_epoch_loss:
+            torch.save(model.cpu().state_dict,
+                       'checkpoints/basiclstm_l{}_best.pt')
+            best_epoch_loss = tmp_epoch_loss
         if use_tensorboard:
             writer.add_scalar('Epoch loss ({} layers)'.format(rnn_layers), tmp_epoch_loss, epoch)
         else:
             plt.plot(epoch_loss)
             plt.pause(0.1)
-
     torch.save(model, 'checkpoints/basiclstm_{}_layers.pt'.format(rnn_layers))

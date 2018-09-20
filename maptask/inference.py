@@ -1,3 +1,4 @@
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 from maptask.dataset import DSet
@@ -41,13 +42,24 @@ dset = DSet()
 dloader = DataLoader(dset, batch_size=64, shuffle=True)
 
 # Load model
-model_path = 'checkpoints/basiclstm_l2_best.pt'
+model_path = 'checkpoints/basiclstm_l5_best.pt'
 
 print('Loading model: ', model_path)
-model = torch.load(model_path)
-model.eval()
+old_model = torch.load(model_path)
+old_model.lstm.flatten_parameters()
+state_dict = old_model.state_dict()
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+model = BasicLstm(rnn_layers=5, dropout=0.5).to(device)
+model.load_state_dict(state_dict)
+model.eval()
+
+inp, target = dset.get_random()
+inp = inp.unsqueeze(0).to(device)
+out = model.inference(inp)
+print('Final out shape: ', out.shape)
+plot(out.cpu().detach().squeeze(0), target)
+
 print('Iterate through data set comparing predictions with target: ')
 while True:
     inp, target = dset.get_random()

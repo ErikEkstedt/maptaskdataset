@@ -34,6 +34,7 @@ for rnn_layers in [2, 5, 10, 15, 20]:
     # Model
     print('Training with {} rnn layers'.format(rnn_layers))
     model = BasicLstm(rnn_layers=rnn_layers, dropout=0.5).to(device)
+    model.lstm.flatten_parameters()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     loss_fn = nn.MSELoss()
 
@@ -61,7 +62,7 @@ for rnn_layers in [2, 5, 10, 15, 20]:
         tmp_epoch_loss = torch.tensor(batch_loss).mean().item()
         epoch_loss.append(tmp_epoch_loss)
         if tmp_epoch_loss < best_epoch_loss:
-            torch.save(model.cpu().state_dict,
+            torch.save(model.state_dict,
                        'checkpoints/basiclstm_l{}_best.pt')
             best_epoch_loss = tmp_epoch_loss
         if use_tensorboard:

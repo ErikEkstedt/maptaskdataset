@@ -4,6 +4,8 @@ import numpy as np
 from scipy.io import wavfile
 import matplotlib.pyplot as plt
 
+import torch
+
 import pysptk
 import librosa
 from librosa.display import specshow, waveplot
@@ -234,6 +236,32 @@ class TransformDataset(Dataset):
 
 
 # DataLoader
+
+## Simplest of dataset. Loads numpy files from memory pitch and intensity
+class DSet(Dataset):
+    def __init__(self, root_dir='data'):
+        self.root_dir = root_dir
+        self.pitch = torch.tensor(np.load(os.path.join(root_dir, 'pitch.npy'))[:, :,
+                                                                       :-1]).float()
+        self.intensity = torch.tensor(np.load(os.path.join(root_dir,
+                                                   'intensity.npy'))).float()
+
+    def __len__(self):
+        return self.pitch.shape[1]
+
+    def get_random(self):
+        return self[np.random.randint(len(self))]
+
+    def __getitem__(self, idx):
+        data = torch.stack((self.pitch[0, idx, :-1],
+                           self.intensity[0, idx, :-1],
+                           self.pitch[1, idx, :-1],
+                           self.intensity[1, idx, :-1]))
+        target = torch.stack((self.pitch[1, idx, 1:],
+                              self.intensity[1, idx, 1:]))
+        return data, target
+
+
 class TranformDataloader(DataLoader):
     def __init__(self, dset, batch_size, frames_in, frames_out, verbose=False, *args, **kwargs):
         super().__init__(dset, batch_size, *args, **kwargs)
